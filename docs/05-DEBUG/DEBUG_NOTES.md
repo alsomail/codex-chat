@@ -1,10 +1,69 @@
-# DEBUG_NOTES.md v0.4
-*更新：2026-03-24 11:15 | 状态：🟢review | 维护者：@documentor*
+# DEBUG_NOTES.md v0.6
+*更新：2026-03-25 13:18 | 状态：🟢review | 维护者：@documentor*
 
 ## CHANGELOG
 - v0.1 -> v0.2：新增REQ-001阶段总结（diff/changelog）、风险与优化建议、凌晨汇总报告主线程。
 - v0.2 -> v0.3：新增REQ-003/004联调失败排查模板（弱网/重连），并补充故障升级规则。
 - v0.3 -> v0.4：按并行协作通讯协议完成状态冲突对齐，更新REQ-001主线程结论与风险优先级。
+- v0.4 -> v0.5：补充REQ-001收尾复盘（实现口径、测试验收结果、踩坑记录、后续守护项），用于M1前复用。
+- v0.5 -> v0.6：补录REQ-001 Android交付证据，新增REQ-002收尾复盘（建房/入房/送礼闭环、幂等与风控）。
+
+## REQ-001 收尾复盘（2026-03-25）
+### 1) 交付结论
+- 状态结论：`REQ-001`已完成开发、测试、验收，进入文档收尾阶段（总表已流转至`🟩已验收`）。
+- 自动化回归结果：`11 passed / 0 failed / 0 blocked`。
+- 验收覆盖：OTP发送/校验、OTP provider异常fail-closed(`503 AUTH_005`)、Refresh轮转与重放拦截(`409 AUTH_004`)、legacy路径拒绝、`wallet/summary`字段完整性与鉴权校验。
+
+### 2) 本轮落地口径（与PRD/API_SPEC对齐）
+- 认证主路径固定为：`/api/v1/auth/otp/send`、`/api/v1/auth/otp/verify`、`/api/v1/auth/refresh`、`/api/v1/wallet/summary`。
+- legacy路径统一拒绝：`/api/v1/auth/login/otp`与`/api/auth/*`返回`410`，不再返回成功体。
+- Refresh安全策略落地：仅存`refresh_token_hash`，采用`SHA-256(token + pepper)`；旧refresh token复用返回`AUTH_004`。
+- 响应结构对齐：主结构使用`request_id/code/message/data`，并兼容历史`camelCase`字段，降低Android联调切换成本。
+
+### 3) 踩坑记录（供后续REQ复用）
+| 分类 | 现象 | 根因 | 处理方式 | 预防建议 |
+|---|---|---|---|---|
+| 运行时环境 | 本地Node 14无法执行`node --test` | `node:test`与`node:assert/strict`在旧版本不可用 | 使用`nvm use 18`切换到`v18.20.8`后执行测试 | 测试前置脚本统一校验Node版本`>=18` |
+| npm配置 | `npm test`触发用户侧认证配置报错（`_auth`） | 用户全局`.npmrc`历史配置不兼容新npm | 用`tsc + node --test`直跑，规避与业务无关阻塞 | 在README增加“全局npm配置异常排查”小节 |
+| 联调兼容 | API字段命名由`camelCase`向`snake_case`收敛，客户端存在存量依赖 | 历史实现与API_SPEC演进节奏不一致 | 服务端短期双字段兼容，保障联调连续性 | 在REQ-002前冻结“字段变更策略+废弃窗口” |
+| 安全门禁 | Refresh轮转后旧token复用与“无效token”混在同一错误类别 | 错误码语义边界未拆分 | 明确重放返回`AUTH_004`，其余非法token走`AUTH_001` | 测试模板中固定增加“重放 vs 无效token”断言 |
+
+### 4) 后续守护项（进入REQ-002前）
+1. 在CI增加Node版本守护（避免再次出现环境差异导致的伪失败）。
+2. 对`AUTH_004`、`AUTH_005`建立趋势监控，便于灰度期快速识别重放与OTP供应商异常。
+3. 客户端联调窗口结束后，下线冗余`camelCase`兼容字段，保持接口收敛。
+
+## REQ-001 Android补录（2026-03-25）
+### 1) 本次补录范围
+- 对齐`TEST_STRATEGY`中REQ-001 Android验收证据，补齐“代码完成 -> 测试通过 -> 文档归档”闭环记录。
+- 关注点聚焦：Android登录态维持、refresh轮转一致性、钱包摘要回拉、异常码映射。
+
+### 2) 交付证据摘要
+- 执行环境：`android/` + JDK 17；命令：`./gradlew testDebugUnitTest --no-daemon`。
+- 关键验证：登录成功后token持久化、refresh冲突返回`AUTH_004`、钱包刷新后UI状态一致。
+- 与服务端协同结果：认证主链路与Android状态机行为一致，无额外协议分叉。
+
+### 3) Android侧踩坑补充
+| 分类 | 现象 | 处理方式 | 后续守护 |
+|---|---|---|---|
+| 会话一致性 | refresh轮转成功后，旧会话缓存可能短暂滞后 | 在ViewModel中串行化refresh与wallet刷新动作 | 保持“refresh成功后强制钱包回拉”门禁用例 |
+| 错误码映射 | `AUTH_004`与通用鉴权失败文案易混淆 | 客户端区分“重放冲突”与“普通失效”提示 | UI错误码映射表固定纳入发布前回归 |
+
+## REQ-002 收尾复盘（2026-03-25）
+### 1) 交付结论
+- 状态结论：`REQ-002`已完成开发、测试、验收，当前完成文档归档并维持`🟩已验收`。
+- 验收覆盖：建房/入房票据、礼物扣费闭环、订单追踪、幂等重放、风险拦截、Android时序一致性。
+- 协议时序结论：`gift.accepted -> gift.broadcast -> leaderboard.updated`验证通过。
+
+### 2) 关键沉淀
+- 服务端链路：`req002.test.ts`与`req002.socket.test.ts`覆盖业务规则与Socket事件顺序。
+- Android链路：ViewModel测试覆盖入房票据透传、送礼失败回退充值、refresh后会话与钱包一致性。
+- 风控与幂等：`GIFT_003`重复请求返回同`gift_order_id`，`RISK_001/002/003`行为符合预期。
+
+### 3) 后续复用建议（面向REQ-003/004）
+1. 复用REQ-002的“事件时序断言模板”，在语音重连场景增加`session.recovered`顺序校验。
+2. 将礼物订单`gift_order_id`追踪链路扩展到重连补偿日志，降低跨Worker排障成本。
+3. 保留Android关键链路每日冒烟（建房/入房/送礼）直到REQ-003接口冻结完成。
 
 ## 并行协作通讯协议记录（冲突对齐）
 | 时间（UTC+8） | 参与角色 | 冲突点 | 对齐结论 | 动作 |
