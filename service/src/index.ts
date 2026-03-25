@@ -8,13 +8,26 @@ import {
   createEnvOtpVerifier,
   createHttpAuthMiddleware,
   createSocketAuthMiddleware,
+  createWalletSummaryHandler,
 } from "../backend/routes/auth";
+import {
+  createReq002Router,
+  createReq002Service,
+  registerReq002SocketHandlers,
+} from "../backend/routes/req002";
+import {
+  createReq003Router,
+  createReq003Service,
+  registerReq003SocketHandlers,
+} from "../backend/routes/req003";
 
 const port = Number(process.env.PORT ?? "3000");
 const corsOrigin = process.env.CORS_ORIGIN ?? "*";
 
 const accessSecret = process.env.JWT_ACCESS_SECRET;
 const refreshSecret = process.env.JWT_REFRESH_SECRET;
+const refreshTokenPepper =
+  process.env.REFRESH_TOKEN_PEPPER ?? process.env.JWT_REFRESH_SECRET;
 const databaseUrl = process.env.DATABASE_URL;
 const demoOtp = process.env.DEMO_OTP;
 
@@ -38,62 +51,55 @@ const db =
 const verifyHttpAuth = createHttpAuthMiddleware({
   accessTokenSecret: accessSecret,
 });
+const req002Service = createReq002Service();
+const req003Service = createReq003Service();
 
 const authRouter = createAuthRouter({
   db,
   accessTokenSecret: accessSecret,
   refreshTokenSecret: refreshSecret,
+  refreshTokenPepper,
   otpVerifier:
     demoOtp !== undefined ? createEnvOtpVerifier(demoOtp) : undefined,
 });
 app.use("/api/v1/auth", authRouter);
+app.get(
+  "/api/v1/wallet/summary",
+  createWalletSummaryHandler({
+    db,
+    accessTokenSecret: accessSecret,
+  }),
+);
+app.use(
+  "/api/v1",
+  createReq002Router({
+    authMiddleware: verifyHttpAuth,
+    service: req002Service,
+  }),
+);
+app.use(
+  "/api/v1",
+  createReq003Router({
+    authMiddleware: verifyHttpAuth,
+    roomAccess: req002Service,
+    service: req003Service,
+  }),
+);
+app.use("/api/auth", (_request, response) => {
+  response.status(410).json({
+    code: "AUTH_001",
+    message: "Legacy auth path is deprecated.",
+  });
+});
 
 app.get("/api/v1/rooms/demo", verifyHttpAuth, (_request, response) => {
   response.status(200).json({
-    rooms: [
-      {
-        roomId: "room_mena_chill_01",
-        name: "MENA Chill Lounge",
-        hostName: "Nora",
-        onlineCount: 72,
-      },
-      {
-        roomId: "room_night_owl_02",
-        name: "Night Owl Talk",
-        hostName: "Omar",
-        onlineCount: 48,
-      },
-      {
-        roomId: "room_gaming_03",
-        name: "Gaming Squad Voice",
-        hostName: "Rami",
-        onlineCount: 39,
-      },
-    ],
+    rooms: req002Service.listRoomPreviews(),
   });
 });
 app.get("/api/rooms/preview", verifyHttpAuth, (_request, response) => {
   response.status(200).json({
-    rooms: [
-      {
-        roomId: "room_mena_chill_01",
-        name: "MENA Chill Lounge",
-        hostName: "Nora",
-        onlineCount: 72,
-      },
-      {
-        roomId: "room_night_owl_02",
-        name: "Night Owl Talk",
-        hostName: "Omar",
-        onlineCount: 48,
-      },
-      {
-        roomId: "room_gaming_03",
-        name: "Gaming Squad Voice",
-        hostName: "Rami",
-        onlineCount: 39,
-      },
-    ],
+    rooms: req002Service.listRoomPreviews(),
   });
 });
 
@@ -118,6 +124,11 @@ io.on("connection", (socket) => {
     deviceId: socket.data.user?.device_id,
     country: socket.data.user?.country,
   });
+});
+registerReq002SocketHandlers(io, req002Service);
+registerReq003SocketHandlers(io, {
+  roomAccess: req002Service,
+  service: req003Service,
 });
 
 server.listen(port, () => {

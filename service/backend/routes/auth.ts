@@ -15,8 +15,8 @@ import type { ExtendedError, Socket } from "socket.io";
 const phoneRegex = /^\+?[1-9]\d{7,14}$/;
 const otpRegex = /^\d{6}$/;
 
-const defaultAccessTokenTtlSeconds = 15 * 60;
-const defaultRefreshTokenTtlSeconds = 7 * 24 * 60 * 60;
+const defaultAccessTokenTtlSeconds = 2 * 60 * 60;
+const defaultRefreshTokenTtlSeconds = 30 * 24 * 60 * 60;
 
 const maxAttemptsPerMinute = 6;
 const rateLimitWindowMs = 60_000;
@@ -24,26 +24,44 @@ const rateLimitWindowMs = 60_000;
 const defaultCountry = "AE";
 const defaultLanguage = "ar";
 
+type AuthErrorCode = "AUTH_001" | "AUTH_002" | "AUTH_003" | "AUTH_004" | "AUTH_005";
+
 type OtpVerifier = (request: {
   phone: string;
   otp: string;
   deviceId: string;
 }) => Promise<boolean>;
 
-interface LoginRequestBody {
+interface OtpSendRequestBody {
+  phone_e164?: unknown;
   phone?: unknown;
-  otp?: unknown;
+  device_id?: unknown;
   deviceId?: unknown;
+  install_id?: unknown;
+  installId?: unknown;
+}
+
+interface LoginRequestBody {
+  phone_e164?: unknown;
+  phone?: unknown;
+  otp_code?: unknown;
+  otp?: unknown;
+  otp_ticket?: unknown;
+  otpTicket?: unknown;
+  device_id?: unknown;
+  deviceId?: unknown;
+  install_id?: unknown;
+  installId?: unknown;
   country?: unknown;
   language?: unknown;
 }
 
-interface OtpSendRequestBody {
-  phone?: unknown;
-}
-
 interface RefreshRequestBody {
+  refresh_token?: unknown;
   refreshToken?: unknown;
+  session_id?: unknown;
+  sessionId?: unknown;
+  device_id?: unknown;
   deviceId?: unknown;
 }
 
@@ -51,6 +69,7 @@ interface LoginIdentity {
   uid: string;
   device_id: string;
   country: string;
+  session_id: string;
 }
 
 interface VerifiedIdentity extends LoginIdentity {
@@ -77,6 +96,15 @@ interface WalletRecord {
   spent30dGold: number;
 }
 
+interface WalletSummary {
+  wallet_gold: number;
+  wallet_bonus_gold: number;
+  frozen_gold: number;
+  total_spent_gold: number;
+  spent_30d_gold: number;
+  risk_level: "LOW" | "MEDIUM" | "HIGH";
+}
+
 interface MemoryUserEntry {
   id: number;
   phone: string;
@@ -86,27 +114,36 @@ interface MemoryUserEntry {
   riskLevel: number;
 }
 
+type SessionStatus = "ACTIVE" | "ROTATED";
+
+interface MemoryRefreshSession {
+  refreshId: string;
+  refreshTokenHash: string;
+  sessionId: string;
+  ip: string;
+  expiresAt: Date;
+  status: SessionStatus;
+}
+
 const memoryUsersByPhone = new Map<string, MemoryUserEntry>();
 const memoryWalletsByUserId = new Map<number, WalletRecord>();
-const memoryRefreshSessions = new Map<
-  string,
-  {
-    refreshId: string;
-    refreshTokenHash: string;
-    ip: string;
-    expiresAt: Date;
-  }
->();
+const memoryRefreshSessions = new Map<string, MemoryRefreshSession>();
 let memoryUserSequence = 1000;
 
 export interface AuthRouteOptions {
   db?: Pool;
   accessTokenSecret: string;
   refreshTokenSecret: string;
+  refreshTokenPepper?: string;
   accessTokenTtlSeconds?: number;
   refreshTokenTtlSeconds?: number;
   otpVerifier?: OtpVerifier;
   now?: () => Date;
+}
+
+export interface WalletSummaryHandlerOptions {
+  db?: Pool;
+  accessTokenSecret: string;
 }
 
 export interface SocketAuthOptions {
@@ -130,20 +167,34 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
     response: Response,
     next: NextFunction,
   ) => {
+    const requestId = resolveRequestId(request);
     try {
       const body = request.body as OtpSendRequestBody;
       const parsedBody = parseOtpSendBody(body);
       if (!parsedBody.ok) {
-        response.status(400).json({ message: parsedBody.message });
+        sendAuthError(response, requestId, 400, "AUTH_001", parsedBody.message);
         return;
       }
       if (otpVerifier === undefined) {
-        response.status(503).json({ message: "OTP provider is unavailable." });
+        sendAuthError(
+          response,
+          requestId,
+          503,
+          "AUTH_005",
+          "OTP provider is unavailable.",
+        );
         return;
       }
 
-      response.status(200).json({
-        requestId: randomUUID(),
+      const now = options.now?.() ?? new Date();
+      const expireAt = new Date(now.getTime() + 5 * 60 * 1000);
+      const otpTicket = `otpt_${randomUUID().replaceAll("-", "")}`;
+      sendSuccess(response, requestId, {
+        otp_ticket: otpTicket,
+        expire_at: expireAt.toISOString(),
+        resend_after_sec: 60,
+      }, {
+        requestId,
         message: `OTP request accepted for ${maskPhone(parsedBody.value.phone)}.`,
       });
     } catch (error) {
@@ -156,24 +207,35 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
     response: Response,
     next: NextFunction,
   ) => {
+    const requestId = resolveRequestId(request);
     try {
       const body = request.body as LoginRequestBody;
       const parsedBody = parseLoginBody(body);
       if (!parsedBody.ok) {
-        response.status(400).json({ message: parsedBody.message });
+        sendAuthError(response, requestId, 400, "AUTH_001", parsedBody.message);
         return;
       }
       if (otpVerifier === undefined) {
-        response.status(503).json({ message: "OTP provider is unavailable." });
+        sendAuthError(
+          response,
+          requestId,
+          503,
+          "AUTH_005",
+          "OTP provider is unavailable.",
+        );
         return;
       }
 
       const ip = request.ip ?? "unknown";
-      const rateLimitKey = `${parsedBody.value.deviceId}:${ip}`;
+      const rateLimitKey = `${parsedBody.value.phone}:${parsedBody.value.deviceId}:${ip}`;
       if (!rateLimiter.allow(rateLimitKey, options.now?.() ?? new Date())) {
-        response.status(429).json({
-          message: "Too many login attempts. Please retry in one minute.",
-        });
+        sendAuthError(
+          response,
+          requestId,
+          429,
+          "AUTH_003",
+          "Too many login attempts. Please retry later.",
+        );
         return;
       }
 
@@ -183,16 +245,17 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
         deviceId: parsedBody.value.deviceId,
       });
       if (!otpPassed) {
-        response.status(401).json({ message: "OTP is invalid or expired." });
+        sendAuthError(response, requestId, 400, "AUTH_002", "OTP is invalid or expired.");
         return;
       }
 
       const refreshId = randomUUID();
+      const sessionId = randomUUID();
       const accessTokenTtl =
         options.accessTokenTtlSeconds ?? defaultAccessTokenTtlSeconds;
       const refreshTokenTtl =
         options.refreshTokenTtlSeconds ?? defaultRefreshTokenTtlSeconds;
-      const nowMs = options.now?.().getTime() ?? Date.now();
+      const now = options.now?.() ?? new Date();
 
       if (options.db === undefined) {
         const memoryState = upsertMemoryUserAndWallet({
@@ -200,12 +263,13 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           country: parsedBody.value.country,
           language: parsedBody.value.language,
         });
-
         const identity: LoginIdentity = {
           uid: String(memoryState.user.id),
           device_id: parsedBody.value.deviceId,
           country: memoryState.user.country,
+          session_id: sessionId,
         };
+
         const accessToken = signToken(
           identity,
           options.accessTokenSecret,
@@ -217,19 +281,34 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           refreshTokenTtl,
         );
 
+        const refreshExpiresAt = new Date(now.getTime() + refreshTokenTtl * 1000);
         upsertMemoryRefreshSession({
           userId: memoryState.user.id,
           deviceId: parsedBody.value.deviceId,
           refreshId,
+          sessionId,
           refreshToken,
           ip,
-          expiresAt: new Date(nowMs + refreshTokenTtl * 1000),
+          expiresAt: refreshExpiresAt,
+          pepper: options.refreshTokenPepper ?? options.refreshTokenSecret,
         });
 
-        response.status(200).json({
+        const walletSummary = buildWalletSummary(memoryState.wallet, memoryState.user.riskLevel);
+        const data = {
+          access_token: accessToken,
+          expires_in_sec: accessTokenTtl,
+          refresh_token: refreshToken,
+          refresh_expires_at: refreshExpiresAt.toISOString(),
+          session_id: sessionId,
+          is_new_user: memoryState.user.firstLogin,
+          wallet_summary: walletSummary,
+        };
+
+        sendSuccess(response, requestId, data, {
           accessToken,
           refreshToken,
           expiresInSeconds: accessTokenTtl,
+          sessionId,
           user: {
             uid: identity.uid,
             country: identity.country,
@@ -263,6 +342,7 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           uid: String(user.id),
           device_id: parsedBody.value.deviceId,
           country: user.country,
+          session_id: sessionId,
         };
         const accessToken = signToken(
           identity,
@@ -275,21 +355,36 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           refreshTokenTtl,
         );
 
+        const refreshExpiresAt = new Date(now.getTime() + refreshTokenTtl * 1000);
         await upsertRefreshSession(client, {
           userId: user.id,
           deviceId: parsedBody.value.deviceId,
           refreshId,
+          sessionId,
           refreshToken,
           ip,
-          expiresAt: new Date(nowMs + refreshTokenTtl * 1000),
+          expiresAt: refreshExpiresAt,
+          pepper: options.refreshTokenPepper ?? options.refreshTokenSecret,
         });
 
         await client.query("COMMIT");
 
-        response.status(200).json({
+        const walletSummary = buildWalletSummary(wallet, user.riskLevel);
+        const data = {
+          access_token: accessToken,
+          expires_in_sec: accessTokenTtl,
+          refresh_token: refreshToken,
+          refresh_expires_at: refreshExpiresAt.toISOString(),
+          session_id: sessionId,
+          is_new_user: user.firstLogin,
+          wallet_summary: walletSummary,
+        };
+
+        sendSuccess(response, requestId, data, {
           accessToken,
           refreshToken,
           expiresInSeconds: accessTokenTtl,
+          sessionId,
           user: {
             uid: identity.uid,
             country: identity.country,
@@ -321,11 +416,12 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
     response: Response,
     next: NextFunction,
   ) => {
+    const requestId = resolveRequestId(request);
     try {
       const body = request.body as RefreshRequestBody;
       const parsedBody = parseRefreshBody(body);
       if (!parsedBody.ok) {
-        response.status(400).json({ message: parsedBody.message });
+        sendAuthError(response, requestId, 400, "AUTH_001", parsedBody.message);
         return;
       }
 
@@ -334,34 +430,50 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
         options.refreshTokenSecret,
       );
       if (refreshIdentity?.refresh_id === undefined) {
-        response.status(401).json({ message: "Invalid or expired refresh token." });
+        sendAuthError(response, requestId, 401, "AUTH_001", "Invalid or expired refresh token.");
         return;
       }
+
       if (
         parsedBody.value.deviceId !== null &&
         parsedBody.value.deviceId !== refreshIdentity.device_id
       ) {
-        response.status(401).json({ message: "refresh token device mismatch." });
+        sendAuthError(response, requestId, 401, "AUTH_001", "Refresh token device mismatch.");
+        return;
+      }
+
+      if (
+        parsedBody.value.sessionId !== null &&
+        parsedBody.value.sessionId !== refreshIdentity.session_id
+      ) {
+        sendAuthError(response, requestId, 401, "AUTH_001", "Refresh token session mismatch.");
         return;
       }
 
       const now = options.now?.() ?? new Date();
-      const refreshTokenHash = sha256(parsedBody.value.refreshToken);
-      const refreshSessionValid =
+      const pepper = options.refreshTokenPepper ?? options.refreshTokenSecret;
+      const refreshTokenHash = hashRefreshToken(parsedBody.value.refreshToken, pepper);
+      const validationResult =
         options.db === undefined
-          ? verifyMemoryRefreshSession(
-              refreshIdentity,
-              refreshTokenHash,
-              now,
-            )
+          ? verifyMemoryRefreshSession(refreshIdentity, refreshTokenHash, now)
           : await verifyPersistentRefreshSession(
               options.db,
               refreshIdentity,
               refreshTokenHash,
               now,
             );
-      if (!refreshSessionValid) {
-        response.status(401).json({ message: "Refresh session is invalid." });
+      if (validationResult === "INVALID") {
+        sendAuthError(response, requestId, 401, "AUTH_001", "Refresh session is invalid.");
+        return;
+      }
+      if (validationResult === "REPLAYED") {
+        sendAuthError(
+          response,
+          requestId,
+          409,
+          "AUTH_004",
+          "Refresh token has already been rotated.",
+        );
         return;
       }
 
@@ -375,6 +487,7 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           uid: refreshIdentity.uid,
           device_id: refreshIdentity.device_id,
           country: refreshIdentity.country,
+          session_id: refreshIdentity.session_id,
         },
         options.accessTokenSecret,
         accessTokenTtl,
@@ -384,6 +497,7 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           uid: refreshIdentity.uid,
           device_id: refreshIdentity.device_id,
           country: refreshIdentity.country,
+          session_id: refreshIdentity.session_id,
           refresh_id: nextRefreshId,
         },
         options.refreshTokenSecret,
@@ -393,7 +507,7 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
       const nextExpiration = new Date(now.getTime() + refreshTokenTtl * 1000);
       const userId = Number.parseInt(refreshIdentity.uid, 10);
       if (Number.isNaN(userId)) {
-        response.status(401).json({ message: "Refresh token user is invalid." });
+        sendAuthError(response, requestId, 401, "AUTH_001", "Refresh token user is invalid.");
         return;
       }
 
@@ -402,9 +516,11 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
           userId,
           deviceId: refreshIdentity.device_id,
           refreshId: nextRefreshId,
+          sessionId: refreshIdentity.session_id,
           refreshToken: rotatedRefreshToken,
           ip,
           expiresAt: nextExpiration,
+          pepper,
         });
       } else {
         const client = await options.db.connect();
@@ -413,19 +529,29 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
             userId,
             deviceId: refreshIdentity.device_id,
             refreshId: nextRefreshId,
+            sessionId: refreshIdentity.session_id,
             refreshToken: rotatedRefreshToken,
             ip,
             expiresAt: nextExpiration,
+            pepper,
           });
         } finally {
           client.release();
         }
       }
 
-      response.status(200).json({
+      sendSuccess(response, requestId, {
+        access_token: accessToken,
+        expires_in_sec: accessTokenTtl,
+        refresh_token: rotatedRefreshToken,
+        refresh_expires_at: nextExpiration.toISOString(),
+        session_id: refreshIdentity.session_id,
+        issued_at: now.toISOString(),
+      }, {
         accessToken,
         refreshToken: rotatedRefreshToken,
         expiresInSeconds: accessTokenTtl,
+        sessionId: refreshIdentity.session_id,
       });
     } catch (error) {
       next(error);
@@ -435,8 +561,66 @@ export const createAuthRouter = (options: AuthRouteOptions): Router => {
   router.post("/otp/send", sendOtpHandler);
   router.post("/otp/verify", otpLoginHandler);
   router.post("/refresh", refreshTokenHandler);
+  router.post("/login/otp", (request, response) => {
+    sendAuthError(
+      response,
+      resolveRequestId(request),
+      410,
+      "AUTH_001",
+      "Legacy auth path is deprecated.",
+    );
+  });
 
   return router;
+};
+
+export const createWalletSummaryHandler = (
+  options: WalletSummaryHandlerOptions,
+): RequestHandler => {
+  return async (request: Request, response: Response, next: NextFunction) => {
+    const requestId = resolveRequestId(request);
+    try {
+      const token = extractHttpBearerToken(request);
+      if (token === null) {
+        sendAuthError(response, requestId, 401, "AUTH_001", "Unauthorized request.");
+        return;
+      }
+
+      const identity = verifyIdentityToken(token, options.accessTokenSecret);
+      if (identity === null) {
+        sendAuthError(response, requestId, 401, "AUTH_001", "Invalid or expired token.");
+        return;
+      }
+
+      const userId = Number.parseInt(identity.uid, 10);
+      if (Number.isNaN(userId)) {
+        sendAuthError(response, requestId, 401, "AUTH_001", "Invalid user identity.");
+        return;
+      }
+
+      const wallet =
+        options.db === undefined
+          ? readMemoryWalletSummary(userId)
+          : await readPersistentWalletSummary(options.db, userId);
+      if (wallet === null) {
+        sendAuthError(response, requestId, 404, "AUTH_001", "Wallet was not found.");
+        return;
+      }
+
+      sendSuccess(response, requestId, wallet, {
+        wallet: {
+          walletGold: wallet.wallet_gold,
+          walletBonusGold: wallet.wallet_bonus_gold,
+          frozenGold: wallet.frozen_gold,
+          totalSpentGold: wallet.total_spent_gold,
+          spent30dGold: wallet.spent_30d_gold,
+          riskLevel: wallet.risk_level,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
 };
 
 export const createSocketAuthMiddleware = (options: SocketAuthOptions) => {
@@ -469,6 +653,7 @@ export const createSocketAuthMiddleware = (options: SocketAuthOptions) => {
       uid: identity.uid,
       device_id: identity.device_id,
       country: identity.country,
+      session_id: identity.session_id,
     };
     next();
   };
@@ -494,6 +679,7 @@ export const createHttpAuthMiddleware = (
       uid: identity.uid,
       device_id: identity.device_id,
       country: identity.country,
+      session_id: identity.session_id,
     };
     next();
   };
@@ -511,6 +697,7 @@ export const verifyAccessToken = (
     uid: identity.uid,
     device_id: identity.device_id,
     country: identity.country,
+    session_id: identity.session_id,
   };
 };
 
@@ -625,18 +812,73 @@ const readWallet = async (
   };
 };
 
+const readPersistentWalletSummary = async (
+  db: Pool,
+  userId: number,
+): Promise<WalletSummary | null> => {
+  const result = await db.query<{
+    wallet_gold: number;
+    wallet_bonus_gold: number;
+    frozen_gold: number;
+    total_spent_gold: number;
+    spent_30d_gold: number;
+    risk_level: number;
+  }>(
+    `
+      SELECT
+        w.wallet_gold,
+        w.wallet_bonus_gold,
+        w.frozen_gold,
+        w.total_spent_gold,
+        w.spent_30d_gold,
+        u.risk_level
+      FROM user_wallets w
+      JOIN app_users u ON u.id = w.user_id
+      WHERE w.user_id = $1
+      LIMIT 1;
+    `,
+    [userId],
+  );
+
+  if (result.rowCount !== 1) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  return {
+    wallet_gold: row.wallet_gold,
+    wallet_bonus_gold: row.wallet_bonus_gold,
+    frozen_gold: row.frozen_gold,
+    total_spent_gold: row.total_spent_gold,
+    spent_30d_gold: row.spent_30d_gold,
+    risk_level: normalizeRiskLevel(row.risk_level),
+  };
+};
+
+const readMemoryWalletSummary = (userId: number): WalletSummary | null => {
+  const wallet = memoryWalletsByUserId.get(userId);
+  if (wallet === undefined) {
+    return null;
+  }
+
+  const user = Array.from(memoryUsersByPhone.values()).find((item) => item.id === userId);
+  return buildWalletSummary(wallet, user?.riskLevel ?? 0);
+};
+
 const upsertRefreshSession = async (
   client: PoolClient,
   input: {
     userId: number;
     deviceId: string;
     refreshId: string;
+    sessionId: string;
     refreshToken: string;
     ip: string;
     expiresAt: Date;
+    pepper: string;
   },
 ): Promise<void> => {
-  const tokenHash = sha256(input.refreshToken);
+  const tokenHash = hashRefreshToken(input.refreshToken, input.pepper);
   await client.query(
     `
       INSERT INTO user_sessions (
@@ -668,15 +910,17 @@ const upsertRefreshSession = async (
   );
 };
 
+type RefreshSessionVerification = "ACTIVE" | "INVALID" | "REPLAYED";
+
 const verifyPersistentRefreshSession = async (
   db: Pool,
   identity: VerifiedIdentity,
   refreshTokenHash: string,
   now: Date,
-): Promise<boolean> => {
+): Promise<RefreshSessionVerification> => {
   const userId = Number.parseInt(identity.uid, 10);
   if (Number.isNaN(userId) || identity.refresh_id === undefined) {
-    return false;
+    return "INVALID";
   }
 
   const session = await db.query<{
@@ -697,46 +941,47 @@ const verifyPersistentRefreshSession = async (
     [userId, identity.device_id],
   );
   if (session.rowCount !== 1) {
-    return false;
+    return "INVALID";
   }
 
   const row = session.rows[0];
-  if (row.refresh_id !== identity.refresh_id) {
-    return false;
-  }
-  if (row.refresh_token_hash !== refreshTokenHash) {
-    return false;
-  }
-
   const expiresAtMs = new Date(row.expires_at).getTime();
-  if (Number.isNaN(expiresAtMs)) {
-    return false;
+  if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+    return "INVALID";
   }
 
-  return expiresAtMs > now.getTime();
+  if (row.refresh_id === identity.refresh_id && row.refresh_token_hash === refreshTokenHash) {
+    return "ACTIVE";
+  }
+
+  return "REPLAYED";
 };
 
 const verifyMemoryRefreshSession = (
   identity: VerifiedIdentity,
   refreshTokenHash: string,
   now: Date,
-): boolean => {
+): RefreshSessionVerification => {
   if (identity.refresh_id === undefined) {
-    return false;
+    return "INVALID";
   }
 
   const key = `${identity.uid}:${identity.device_id}`;
   const session = memoryRefreshSessions.get(key);
   if (session === undefined) {
-    return false;
+    return "INVALID";
   }
-  if (session.refreshId !== identity.refresh_id) {
-    return false;
+  if (session.expiresAt.getTime() <= now.getTime()) {
+    return "INVALID";
   }
-  if (session.refreshTokenHash !== refreshTokenHash) {
-    return false;
+  if (
+    session.status === "ACTIVE" &&
+    session.refreshId === identity.refresh_id &&
+    session.refreshTokenHash === refreshTokenHash
+  ) {
+    return "ACTIVE";
   }
-  return session.expiresAt.getTime() > now.getTime();
+  return "REPLAYED";
 };
 
 const parseOtpSendBody = (
@@ -752,11 +997,19 @@ const parseOtpSendBody = (
       ok: false;
       message: string;
     } => {
-  const phone = normalizeString(body.phone);
+  const phone = pickString(body.phone_e164, body.phone);
   if (phone === null || !phoneRegex.test(phone)) {
     return {
       ok: false,
-      message: "phone is required and must be E.164-like format.",
+      message: "phone_e164 is required and must be E.164 format.",
+    };
+  }
+
+  const deviceId = pickString(body.device_id, body.deviceId);
+  if (deviceId !== null && deviceId.length < 8) {
+    return {
+      ok: false,
+      message: "device_id must be at least 8 chars when provided.",
     };
   }
 
@@ -785,18 +1038,18 @@ const parseLoginBody = (
       ok: false;
       message: string;
     } => {
-  const phone = normalizeString(body.phone);
-  const otp = normalizeString(body.otp);
-  const deviceId = normalizeString(body.deviceId);
+  const phone = pickString(body.phone_e164, body.phone);
+  const otp = pickString(body.otp_code, body.otp);
+  const deviceId = pickString(body.device_id, body.deviceId);
 
   if (phone === null || !phoneRegex.test(phone)) {
-    return { ok: false, message: "phone is required and must be E.164-like format." };
+    return { ok: false, message: "phone_e164 is required and must be E.164 format." };
   }
   if (otp === null || !otpRegex.test(otp)) {
-    return { ok: false, message: "otp is required and must be 6 digits." };
+    return { ok: false, message: "otp_code is required and must be 6 digits." };
   }
   if (deviceId === null || deviceId.length < 8) {
-    return { ok: false, message: "deviceId is required." };
+    return { ok: false, message: "device_id is required and must be at least 8 chars." };
   }
 
   const country = normalizeString(body.country) ?? defaultCountry;
@@ -821,6 +1074,7 @@ const parseRefreshBody = (
       ok: true;
       value: {
         refreshToken: string;
+        sessionId: string | null;
         deviceId: string | null;
       };
     }
@@ -828,19 +1082,21 @@ const parseRefreshBody = (
       ok: false;
       message: string;
     } => {
-  const refreshToken = normalizeString(body.refreshToken);
+  const refreshToken = pickString(body.refresh_token, body.refreshToken);
   if (refreshToken === null) {
     return {
       ok: false,
-      message: "refreshToken is required.",
+      message: "refresh_token is required.",
     };
   }
 
-  const deviceId = normalizeString(body.deviceId);
+  const deviceId = pickString(body.device_id, body.deviceId);
+  const sessionId = pickString(body.session_id, body.sessionId);
   return {
     ok: true,
     value: {
       refreshToken,
+      sessionId,
       deviceId,
     },
   };
@@ -851,6 +1107,16 @@ const maskPhone = (phone: string): string => {
     return `${phone.slice(0, 2)}****`;
   }
   return `${phone.slice(0, 4)}****${phone.slice(-2)}`;
+};
+
+const pickString = (...values: unknown[]): string | null => {
+  for (const value of values) {
+    const normalized = normalizeString(value);
+    if (normalized !== null) {
+      return normalized;
+    }
+  }
+  return null;
 };
 
 const normalizeString = (value: unknown): string | null => {
@@ -923,16 +1189,25 @@ const upsertMemoryRefreshSession = (input: {
   userId: number;
   deviceId: string;
   refreshId: string;
+  sessionId: string;
   refreshToken: string;
   ip: string;
   expiresAt: Date;
+  pepper: string;
 }): void => {
   const key = `${input.userId}:${input.deviceId}`;
+  const existing = memoryRefreshSessions.get(key);
+  if (existing !== undefined) {
+    existing.status = "ROTATED";
+  }
+
   memoryRefreshSessions.set(key, {
     refreshId: input.refreshId,
-    refreshTokenHash: sha256(input.refreshToken),
+    refreshTokenHash: hashRefreshToken(input.refreshToken, input.pepper),
+    sessionId: input.sessionId,
     ip: input.ip,
     expiresAt: input.expiresAt,
+    status: "ACTIVE",
   });
 };
 
@@ -959,7 +1234,18 @@ const verifyIdentityToken = (
       typeof decoded.device_id === "string" ? decoded.device_id : undefined;
     const country =
       typeof decoded.country === "string" ? decoded.country : undefined;
-    if (uid === undefined || deviceId === undefined || country === undefined) {
+    const sessionId =
+      typeof decoded.session_id === "string"
+        ? decoded.session_id
+        : uid !== undefined && deviceId !== undefined
+          ? deriveFallbackSessionId(uid, deviceId)
+          : undefined;
+    if (
+      uid === undefined ||
+      deviceId === undefined ||
+      country === undefined ||
+      sessionId === undefined
+    ) {
       return null;
     }
 
@@ -969,6 +1255,7 @@ const verifyIdentityToken = (
       uid,
       device_id: deviceId,
       country,
+      session_id: sessionId,
       refresh_id: refreshId,
     };
   } catch {
@@ -1008,6 +1295,72 @@ const extractBearerToken = (
   return token.length > 0 ? token : null;
 };
 
+const normalizeRiskLevel = (riskLevel: number): "LOW" | "MEDIUM" | "HIGH" => {
+  if (riskLevel >= 2) {
+    return "HIGH";
+  }
+  if (riskLevel === 1) {
+    return "MEDIUM";
+  }
+  return "LOW";
+};
+
+const buildWalletSummary = (
+  wallet: WalletRecord,
+  riskLevel: number,
+): WalletSummary => {
+  return {
+    wallet_gold: wallet.walletGold,
+    wallet_bonus_gold: wallet.walletBonusGold,
+    frozen_gold: wallet.frozenGold,
+    total_spent_gold: wallet.totalSpentGold,
+    spent_30d_gold: wallet.spent30dGold,
+    risk_level: normalizeRiskLevel(riskLevel),
+  };
+};
+
+const hashRefreshToken = (token: string, pepper: string): string => {
+  return crypto.createHash("sha256").update(`${token}:${pepper}`).digest("hex");
+};
+
+const deriveFallbackSessionId = (uid: string, deviceId: string): string => {
+  return `sess_${uid}_${deviceId}`;
+};
+
+const resolveRequestId = (request: Request): string => {
+  const header = normalizeString(request.header("x-request-id"));
+  return header ?? `req_${randomUUID().replaceAll("-", "")}`;
+};
+
+const sendSuccess = (
+  response: Response,
+  requestId: string,
+  data: object,
+  legacy: object,
+): void => {
+  response.status(200).json({
+    request_id: requestId,
+    code: "OK",
+    message: "success",
+    data,
+    ...legacy,
+  });
+};
+
+const sendAuthError = (
+  response: Response,
+  requestId: string,
+  status: number,
+  code: AuthErrorCode,
+  message: string,
+): void => {
+  response.status(status).json({
+    request_id: requestId,
+    code,
+    message,
+  });
+};
+
 class InMemoryLoginRateLimiter {
   private readonly buckets = new Map<string, number[]>();
 
@@ -1033,7 +1386,3 @@ class InMemoryLoginRateLimiter {
     return true;
   }
 }
-
-const sha256 = (input: string): string => {
-  return crypto.createHash("sha256").update(input).digest("hex");
-};

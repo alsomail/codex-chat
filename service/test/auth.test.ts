@@ -6,11 +6,13 @@ import express from "express";
 import {
   createAuthRouter,
   createHttpAuthMiddleware,
+  createWalletSummaryHandler,
   verifyAccessToken,
 } from "../backend/routes/auth";
 
 const accessSecret = "access-secret-1234567890";
 const refreshSecret = "refresh-secret-1234567890";
+const refreshPepper = "pepper-secret-1234567890";
 const demoOtp = "246810";
 
 type JsonRecord = Record<string, unknown>;
@@ -30,11 +32,26 @@ const createTestApp = (options?: { otpVerifier?: TestOtpVerifier | null }) => {
     createAuthRouter({
       accessTokenSecret: accessSecret,
       refreshTokenSecret: refreshSecret,
+      refreshTokenPepper: refreshPepper,
       otpVerifier:
         options?.otpVerifier === null
           ? undefined
           : options?.otpVerifier ?? (async ({ otp }) => otp === demoOtp),
       now: () => new Date("2026-03-24T00:00:00.000Z"),
+    }),
+  );
+
+  app.use("/api/auth", (_req, res) => {
+    res.status(410).json({
+      code: "AUTH_001",
+      message: "Legacy auth path is deprecated.",
+    });
+  });
+
+  app.get(
+    "/api/v1/wallet/summary",
+    createWalletSummaryHandler({
+      accessTokenSecret: accessSecret,
     }),
   );
 
@@ -118,45 +135,65 @@ const getJson = async (
   };
 };
 
-test("REQ-001 login via /otp/verify returns JWT and first login true", async () => {
+const responseData = (body: JsonRecord): JsonRecord => {
+  const data = body.data;
+  assert.equal(typeof data, "object");
+  assert.notEqual(data, null);
+  return data as JsonRecord;
+};
+
+test("REQ-001 login via /otp/verify returns JWT and wallet summary", async () => {
   await withServer(async (baseUrl) => {
     const response = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-      phone: "+971500000001",
-      otp: demoOtp,
-      deviceId: "device-alpha-01",
+      phone_e164: "+971500000001",
+      otp_code: demoOtp,
+      device_id: "device-alpha-01",
       country: "AE",
       language: "ar",
     });
 
     assert.equal(response.status, 200);
+    assert.equal(response.body.code, "OK");
+
+    const data = responseData(response.body);
+    assert.equal(typeof data.access_token, "string");
+    assert.equal(typeof data.refresh_token, "string");
+    assert.equal(data.is_new_user, true);
+
+    const wallet = data.wallet_summary as JsonRecord;
+    assert.equal(wallet.wallet_gold, 0);
+    assert.equal(wallet.wallet_bonus_gold, 0);
+    assert.equal(wallet.spent_30d_gold, 0);
+
+    // Keep compatibility contract for existing Android integration.
     assert.equal(typeof response.body.accessToken, "string");
     assert.equal(typeof response.body.refreshToken, "string");
-
-    const user = response.body.user as JsonRecord;
-    assert.equal(user.firstLogin, true);
-    const wallet = response.body.wallet as JsonRecord;
-    assert.equal(wallet.walletGold, 0);
-    assert.equal(wallet.walletBonusGold, 0);
   });
 });
 
-test("POST /otp/send accepts a valid request", async () => {
+test("POST /otp/send returns otp_ticket contract", async () => {
   await withServer(async (baseUrl) => {
     const response = await postJson(`${baseUrl}/api/v1/auth/otp/send`, {
-      phone: "+971500000000",
+      phone_e164: "+971500000000",
+      device_id: "device-send-01",
+      install_id: "install-send-01",
+      channel: "login",
     });
 
     assert.equal(response.status, 200);
-    assert.equal(typeof response.body.requestId, "string");
+    const data = responseData(response.body);
+    assert.equal(typeof data.otp_ticket, "string");
+    assert.equal(typeof data.expire_at, "string");
+    assert.equal(data.resend_after_sec, 60);
   });
 });
 
-test("second login via /otp/verify is not first login", async () => {
+test("second login via /otp/verify is not a new user", async () => {
   await withServer(async (baseUrl) => {
     const payload = {
-      phone: "+971500000002",
-      otp: demoOtp,
-      deviceId: "device-beta-01",
+      phone_e164: "+971500000002",
+      otp_code: demoOtp,
+      device_id: "device-beta-01",
       country: "AE",
       language: "ar",
     };
@@ -166,76 +203,123 @@ test("second login via /otp/verify is not first login", async () => {
 
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
-    const user = second.body.user as JsonRecord;
-    assert.equal(user.firstLogin, false);
+
+    const secondData = responseData(second.body);
+    assert.equal(secondData.is_new_user, false);
   });
 });
 
-test("legacy /login/otp is rejected to enforce API spec path", async () => {
+test("legacy auth paths are rejected", async () => {
   await withServer(async (baseUrl) => {
-    const response = await postJson(`${baseUrl}/api/v1/auth/login/otp`, {
-      phone: "+971500000099",
-      otp: demoOtp,
-      deviceId: "device-legacy-01",
-      country: "AE",
-      language: "ar",
+    const legacyV1 = await postJson(`${baseUrl}/api/v1/auth/login/otp`, {
+      phone_e164: "+971500000099",
+      otp_code: demoOtp,
+      device_id: "device-legacy-01",
     });
+    assert.equal(legacyV1.status, 410);
 
-    assert.equal(response.status, 404);
+    const legacyRoot = await postJson(`${baseUrl}/api/auth/otp/verify`, {
+      phone_e164: "+971500000099",
+      otp_code: demoOtp,
+      device_id: "device-legacy-01",
+    });
+    assert.equal(legacyRoot.status, 410);
   });
 });
 
-test("refresh token rotates refresh_id and returns a new access token", async () => {
+test("refresh rotates tokens and old refresh token reuse returns AUTH_004", async () => {
   await withServer(async (baseUrl) => {
     const login = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-      phone: "+971500000111",
-      otp: demoOtp,
-      deviceId: "device-refresh-01",
+      phone_e164: "+971500000111",
+      otp_code: demoOtp,
+      device_id: "device-refresh-01",
       country: "AE",
       language: "ar",
     });
 
     assert.equal(login.status, 200);
+    const loginData = responseData(login.body);
+    const firstRefreshToken = loginData.refresh_token as string;
+    const sessionId = loginData.session_id as string;
+
     const refreshed = await postJson(`${baseUrl}/api/v1/auth/refresh`, {
-      refreshToken: login.body.refreshToken,
-      deviceId: "device-refresh-01",
+      refresh_token: firstRefreshToken,
+      session_id: sessionId,
+      device_id: "device-refresh-01",
     });
 
     assert.equal(refreshed.status, 200);
-    assert.equal(typeof refreshed.body.accessToken, "string");
-    assert.equal(typeof refreshed.body.refreshToken, "string");
-    assert.notEqual(refreshed.body.refreshToken, login.body.refreshToken);
+    const refreshedData = responseData(refreshed.body);
+    assert.equal(typeof refreshedData.access_token, "string");
+    assert.equal(typeof refreshedData.refresh_token, "string");
+    assert.notEqual(refreshedData.refresh_token, firstRefreshToken);
+
+    const replayed = await postJson(`${baseUrl}/api/v1/auth/refresh`, {
+      refresh_token: firstRefreshToken,
+      session_id: sessionId,
+      device_id: "device-refresh-01",
+    });
+    assert.equal(replayed.status, 409);
+    assert.equal(replayed.body.code, "AUTH_004");
   });
 });
 
-test("otp verify returns 503 when verifier is not configured", async () => {
+test("wallet summary endpoint returns required REQ-001 fields", async () => {
+  await withServer(async (baseUrl) => {
+    const login = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
+      phone_e164: "+971500000112",
+      otp_code: demoOtp,
+      device_id: "device-wallet-01",
+      country: "AE",
+      language: "ar",
+    });
+
+    const loginData = responseData(login.body);
+    const accessToken = loginData.access_token as string;
+
+    const wallet = await getJson(`${baseUrl}/api/v1/wallet/summary`, accessToken);
+    assert.equal(wallet.status, 200);
+
+    const walletData = responseData(wallet.body);
+    assert.equal(typeof walletData.wallet_gold, "number");
+    assert.equal(typeof walletData.wallet_bonus_gold, "number");
+    assert.equal(typeof walletData.frozen_gold, "number");
+    assert.equal(typeof walletData.total_spent_gold, "number");
+    assert.equal(typeof walletData.spent_30d_gold, "number");
+    assert.equal(typeof walletData.risk_level, "string");
+  });
+});
+
+test("otp verify returns 503 AUTH_005 when verifier is not configured", async () => {
   await withServer(
     async (baseUrl) => {
       const response = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-        phone: "+971500000003",
-        otp: demoOtp,
-        deviceId: "device-without-provider-01",
+        phone_e164: "+971500000003",
+        otp_code: demoOtp,
+        device_id: "device-without-provider-01",
         country: "AE",
         language: "en",
       });
 
       assert.equal(response.status, 503);
+      assert.equal(response.body.code, "AUTH_005");
     },
     { otpVerifier: null },
   );
 });
 
-test("invalid otp returns 401", async () => {
+test("invalid otp returns 400 AUTH_002", async () => {
   await withServer(async (baseUrl) => {
     const response = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-      phone: "+971500000003",
-      otp: "000000",
-      deviceId: "device-gamma-01",
+      phone_e164: "+971500000003",
+      otp_code: "000000",
+      device_id: "device-gamma-01",
       country: "AE",
       language: "en",
     });
 
-    assert.equal(response.status, 401);
+    assert.equal(response.status, 400);
+    assert.equal(response.body.code, "AUTH_002");
   });
 });
 
@@ -243,38 +327,41 @@ test("rate limit blocks the 7th failed attempt in one minute", async () => {
   await withServer(async (baseUrl) => {
     for (let i = 0; i < 6; i += 1) {
       const response = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-        phone: "+971500000004",
-        otp: "111111",
-        deviceId: "device-rate-01",
+        phone_e164: "+971500000004",
+        otp_code: "111111",
+        device_id: "device-rate-01",
         country: "AE",
         language: "en",
       });
-      assert.equal(response.status, 401);
+      assert.equal(response.status, 400);
+      assert.equal(response.body.code, "AUTH_002");
     }
 
     const blocked = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-      phone: "+971500000004",
-      otp: "111111",
-      deviceId: "device-rate-01",
+      phone_e164: "+971500000004",
+      otp_code: "111111",
+      device_id: "device-rate-01",
       country: "AE",
       language: "en",
     });
     assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.code, "AUTH_003");
   });
 });
 
 test("authorized token can read room preview", async () => {
   await withServer(async (baseUrl) => {
     const login = await postJson(`${baseUrl}/api/v1/auth/otp/verify`, {
-      phone: "+971500000005",
-      otp: demoOtp,
-      deviceId: "device-room-01",
+      phone_e164: "+971500000005",
+      otp_code: demoOtp,
+      device_id: "device-room-01",
       country: "AE",
       language: "en",
     });
 
     assert.equal(login.status, 200);
-    const token = login.body.accessToken as string;
+    const loginData = responseData(login.body);
+    const token = loginData.access_token as string;
     const tokenIdentity = verifyAccessToken(token, accessSecret);
     assert.equal(tokenIdentity?.device_id, "device-room-01");
 

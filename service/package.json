@@ -7,7 +7,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
-    "test": "npm run build && node --test dist/test/auth.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
     "dotenv": "^16.5.0",
