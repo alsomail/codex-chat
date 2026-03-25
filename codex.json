@@ -1,0 +1,9 @@
+{
+    "sandbox": {
+      "writable_paths": [
+        "service/dist/",
+        "android/build/"
+      ]
+    }
+  }
+  

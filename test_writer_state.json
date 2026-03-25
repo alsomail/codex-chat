@@ -1,0 +1,10 @@
+{
+  "next_poll": "2026-03-24T05:45:47.850462+00:00",
+  "processed_msg_ids": [
+    "EVT-FEAT-TEST-002",
+    "EVT-PRD-TEST-001",
+    "REQ001-MILESTONE-EVENT-001"
+  ],
+  "blocked": false,
+  "last_block_msg_id": null
+}

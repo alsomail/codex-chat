@@ -1,0 +1,8 @@
+[agents]
+max_threads = 5
+max_depth = 3
+load_from = "AGENTS.md"  # 加载所有角色
+
+[tools]
+web_search = true  # product_mgr调研用
+code_editor = true  # feature_dev写代码

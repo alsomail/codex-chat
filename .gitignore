@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Android / Gradle
+android/.gradle/
+android/.gradle-home/
+android/build/
+android/app/build/
+
+# Node
+node_modules/
+service/node_modules/
+
+# Local env (keep .env.example)
+.env
