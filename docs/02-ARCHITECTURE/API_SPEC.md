@@ -1,13 +1,14 @@
-# API_SPEC.md v0.3 - REQ-001~004 MVP接口规范（最终草案）
+# API_SPEC.md v0.4 - REQ-001~004 MVP接口规范（最终草案）
 *更新：2026-03-25 | 状态：🟢review | Tokens: 0/2M*
 
 CHANGELOG
 - v0.0 -> v0.1：补齐REQ-001/002接口、Socket事件、错误码、验收与风控口径。
 - v0.1 -> v0.2：补齐REQ-003/004（RTC协商、会话恢复）接口契约与验收映射，形成可开发草案。
 - v0.2 -> v0.3：补充`REQ-001`认证联调固定口径，冻结规范路径、OTP/Refresh请求响应、legacy路径回归要求与刷新轮转错误码。
+- v0.3 -> v0.4：对齐`PRD v0.5`口径，修正遗留`v0.4`引用；补齐REQ-001钱包汇总字段示例（累计消费/近30天消费）并明确向后兼容要求。
 
 ## 1. 目标与范围
-- 对齐`PRD v0.4`，冻结MVP接口契约：登录/钱包/充值/入房/送礼/音频通话/掉线重连。
+- 对齐`PRD v0.5`，冻结MVP接口契约：登录/钱包/充值/入房/送礼/音频通话/掉线重连。
 - 支持四项需求验收口径：
   - REQ-001：登录成功率 >= 99%
   - REQ-002：礼物链路联调ready
@@ -83,7 +84,7 @@ CHANGELOG
 - 失败关闭：OTP provider异常时返回`503 AUTH_005`，不得回退静态口令。
 
 #### POST `/auth/otp/verify`
-- OTP登录并签发JWT，首登自动开钱包（`wallet_gold`, `wallet_bonus_gold`, `risk_level`）
+- OTP登录并签发JWT，首登自动开钱包并返回`wallet_summary`（余额/冻结/累计消费/近30天消费/风险等级）
 - 请求体：
 ```json
 {
@@ -111,6 +112,8 @@ CHANGELOG
       "wallet_gold": 0,
       "wallet_bonus_gold": 0,
       "frozen_gold": 0,
+      "total_spent_gold": 0,
+      "spent_30d_gold": 0,
       "risk_level": "LOW"
     }
   }
@@ -152,6 +155,24 @@ CHANGELOG
 #### GET `/wallet/summary`
 - 查询钱包余额、冻结、累计消费、近30天消费
 - 成功返回字段最少包含：`wallet_gold`、`wallet_bonus_gold`、`frozen_gold`、`total_spent_gold`、`spent_30d_gold`、`risk_level`
+- 字段口径说明：
+  - `total_spent_gold`与`spent_30d_gold`会与`REQ-002`账务/订单口径对齐；在`REQ-002`未落地前允许返回`0`，但字段必须保留以保证客户端兼容。
+- 成功返回示例：
+```json
+{
+  "request_id": "req_01HT...",
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "wallet_gold": 120,
+    "wallet_bonus_gold": 0,
+    "frozen_gold": 0,
+    "total_spent_gold": 80,
+    "spent_30d_gold": 80,
+    "risk_level": "LOW"
+  }
+}
+```
 
 ### 3.2 支付与账务（REQ-001/002）
 #### POST `/payments/googleplay/verify`

@@ -1,9 +1,10 @@
-# ARCHITECTURE.md v0.2 - Android(Kotlin WebRTC)+Node.js SFU
+# ARCHITECTURE.md v0.3 - Android(Kotlin WebRTC)+Node.js SFU
 *更新：2026-03-25 | 状态：🟢review | Tokens: 0/2M*
 
 CHANGELOG
 - v0.0 -> v0.1：初始SFU架构设计，覆盖SLA 99%与100并发<300ms目标。
-- v0.1 -> v0.2：补齐`REQ-001`架构专章，冻结认证链路、Refresh安全策略、会话存储、风控限流、可观测指标、联调前检查清单与发布门禁；同步对齐`PRD v0.4`当前状态。
+- v0.1 -> v0.2：补齐`REQ-001`架构专章，冻结认证链路、Refresh安全策略、会话存储、风控限流、可观测指标、联调前检查清单与发布门禁；同步对齐`PRD`当前状态。
+- v0.2 -> v0.3：对齐`PRD v0.5`与`DEMAND_ENTRANCE`口径，消除`draft/v0.4`遗留描述；在REQ-001专章补充“架构阶段已完成/未完成/发布门禁”，用于交棒`@feature_dev`开发落地。
 
 ## 1. 设计目标（与PRD对齐）
 - 业务形态：仿Yalla多人语聊房（1个房间最多100并发在线，最多8人上麦发言）。
@@ -108,12 +109,33 @@ sequenceDiagram
 ## 11. REQ-001 架构专章（登录 / 钱包开通）
 
 ### 11.1 当前状态与交付目标
-- 与`/Users/yuanye/myWork/ChatRoom/docs/00-ENTRANCE/PROJECT_OVERVIEW.md`、`/Users/yuanye/myWork/ChatRoom/docs/01-PRODUCT/PRD.md`对齐，`REQ-001`当前状态仍为`🟡draft`，原因是`OTP回退口令`、`Refresh Token明文存储`、`接口路径偏差`三项P0阻塞尚未在主线程复审清零。
+- 当前需求状态以`/Users/yuanye/myWork/ChatRoom/docs/00-ENTRANCE/DEMAND_ENTRANCE.md`与`/Users/yuanye/myWork/ChatRoom/docs/01-PRODUCT/PRD.md (v0.5)`为准：本次已完成架构冻结与接口口径对齐，`REQ-001`具备推进到`🟢待开发`并交棒`@feature_dev`落地实现的条件。
+- `OTP回退口令`、`Refresh Token明文存储`、`接口路径偏差`仍是P0安全门禁，但它们属于“实现+联调回归必须清零”的问题；本阶段（架构）交付物是冻结口径、接口契约、存储边界与门禁检查点，确保开发不会走偏。
 - 架构侧本轮目标是把`REQ-001`补到“可执行联调”状态，而不是提前宣告业务通过；具体指：
   - 认证链路、状态机、失败分支、错误码与数据边界冻结；
   - `feature_dev`有明确的实现落点与存储模型；
   - `test_writer`有可执行的检查清单、观测指标与证据模板；
   - 发布门禁能够在灰度前阻断不安全实现。
+
+#### 架构阶段已完成项（REQ-001，冻结口径）
+- 接口路径冻结：仅允许`/api/v1/auth/otp/send`、`/api/v1/auth/otp/verify`、`/api/v1/auth/refresh`与`/api/v1/wallet/summary`；legacy路径统一`404/410`并上报`legacy_auth_path_hit_total`。
+- 认证链路与事务边界冻结：`user upsert -> wallet bootstrap -> risk init -> refresh session insert -> commit -> issue tokens`同一事务，避免“token已签发但钱包未开”的半成功。
+- Refresh安全策略冻结：强制轮转、只存`refresh_token_hash`（`SHA-256(token + server_pepper)`）、旧token重放返回`AUTH_004`、跨实例吊销传播窗口`<=60s`。
+- 会话/缓存边界冻结：`auth_refresh_session`（PG权威）+ `auth:session:*`/`auth:revoke:*`（Redis热路径/吊销索引）+ 频控Key（Redis）。
+- 风控与限流基线冻结：OTP发送/校验、refresh频控与命中后的统一错误码（`AUTH_002/003/004/005` + `RISK_*`）。
+- 可观测与联调检查清单冻结：成功率、轮转重放、legacy路径命中、钱包开户成功率等指标与联调证据要求（见11.6/11.7）。
+
+#### 架构阶段未完成项（待开发落地/待联调验证）
+- OTP provider接入细节：联调环境配置、白名单/获取验证码方式、超时重试策略与`503 AUTH_005`统一降级提示文案（必须fail-closed，不得回退口令）。
+- Android安全存储落地：refresh token写入Keystore/EncryptedSharedPreferences；access token不落盘；崩溃日志/埋点脱敏校验。
+- 钱包统计字段落地：`total_spent_gold`与`spent_30d_gold`的计算口径需与`REQ-002`账务/订单模型对齐（可先返回0，但必须保留字段并保证向后兼容）。
+- 灰度前门禁回归：legacy路径命中为0、日志脱敏抽检通过、refresh轮转/重放用例通过、首登重复请求不重复开户（幂等）。
+
+#### 发布门禁（REQ-001 / PRD v0.5 P0）
+- OTP provider异常必须`fail-closed`：只允许返回`503 AUTH_005`，禁止任何“回退口令/测试后门/固定验证码”。
+- refresh token仅哈希存储：数据库/缓存/日志/异常栈/埋点均不得出现明文refresh token。
+- legacy认证路径必须拒绝：`/api/auth/*`与`/api/v1/auth/login/otp`禁止继续返回成功体（`404/410`）。
+- 刷新轮转必须生效：刷新后旧refresh token在`<=60s`内全链路不可再用；检测到旧token复用必须返回`AUTH_004`并打点。
 
 ### 11.2 认证链路（冻结方案）
 - 规范路径只保留`/api/v1/auth/otp/send`、`/api/v1/auth/otp/verify`、`/api/v1/auth/refresh`三条主入口；`/api/auth/*`与`/api/v1/auth/login/otp`视为legacy路径，统一返回`404`或`410`并打观测点。
