@@ -329,3 +329,76 @@ test("REQ-003 seat conflict returns RTC_003 and emits seat conflict event", () =
   assert.notEqual(error, undefined);
   assert.equal(error?.error_code, "RTC_003");
 });
+
+test("REQ-003 session reconnect emits recover hint and subscription plan", () => {
+  const req002Service = createReq002Service();
+  const req003Service = createReq003Service();
+  const io = new FakeIo();
+  registerReq003SocketHandlers(io as unknown as Server, {
+    roomAccess: req002Service,
+    service: req003Service,
+  });
+
+  const now = new Date();
+  const room = req002Service.createRoom({
+    uid: "u_reconnect_owner",
+    visibility: "PUBLIC",
+    topic: "REQ-003 Reconnect Room",
+    tags: [],
+    language: "ar",
+    now,
+  });
+
+  const socket = new FakeSocket(io, "socket_reconnect_01", {
+    uid: "u_reconnect_owner",
+    device_id: "device-reconnect",
+    country: "AE",
+  });
+  io.connect(socket);
+  void socket.join(room.roomId);
+
+  socket.trigger("rtc.create_transport", {
+    room_id: room.roomId,
+    direction: "send",
+  });
+  const transportId = findEmittedEvent(socket, "rtc.transport_created")?.transport_id as string;
+  socket.trigger("rtc.connect_transport", {
+    transport_id: transportId,
+    dtls_parameters: { role: "auto" },
+  });
+  socket.trigger("rtc.produce", {
+    transport_id: transportId,
+    kind: "audio",
+    app_data: { seat_no: 1 },
+  });
+
+  const issued = req003Service.issueReconnectToken({
+    roomId: room.roomId,
+    sessionId: "sess_reconnect_socket",
+    uid: "u_reconnect_owner",
+    deviceId: "device-reconnect",
+    installId: "install-reconnect",
+    seatIntent: 1,
+    now,
+  });
+  assert.equal(issued.ok, true);
+  if (!issued.ok) {
+    return;
+  }
+
+  socket.trigger("session.reconnect", {
+    room_id: room.roomId,
+    session_id: "sess_reconnect_socket",
+    reconnect_token: issued.value.reconnect_token,
+    last_seq: 0,
+  });
+
+  const reconnected = findEmittedEvent(socket, "session.reconnected");
+  const recoverHint = findEmittedEvent(socket, "room.recover_hint");
+  const plan = socket.emittedEvents.filter((item) => item.event === "rtc.subscription_plan").at(-1)?.payload;
+  assert.notEqual(reconnected, null);
+  assert.equal(reconnected?.resume_ok, true);
+  assert.notEqual(recoverHint, null);
+  assert.equal(recoverHint?.session_id, "sess_reconnect_socket");
+  assert.notEqual(plan, undefined);
+});

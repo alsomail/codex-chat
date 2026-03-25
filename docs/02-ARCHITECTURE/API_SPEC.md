@@ -359,10 +359,20 @@ CHANGELOG
 #### POST `/rooms/{room_id}/reconnect-token`
 - 续签`reconnect_token`（仅房间在线会话可调用）
 - 成功返回：`reconnect_token`, `expires_at`, `session_id`
+- 约束：
+  - 仅允许当前房间在线会话续签，且`device_id + install_id`必须与原会话一致。
+  - 续签会轮转Token版本；旧Token在新Token签发后立即失效。
+  - `expires_at`固定为签发时刻后`30秒`，本周不支持自定义TTL。
 
 #### POST `/sessions/{session_id}/recover`
 - 拉取恢复快照（麦位、订阅、未确认关键事件）
 - 用于`session.reconnected.need_resubscribe=true`后的快速补偿
+- 成功返回最少字段：
+  - `room_id`, `session_id`, `snapshot_seq`, `seat_state`, `seat_intent`
+  - `subscription_plan`, `leaderboard`, `gift_orders`, `resume_cursor`
+- 约束：
+  - 仅回补关键状态，不返回完整历史事件流。
+  - 若`session_id`不存在、窗口超时或Token校验失败，分别返回`RECON_002/003/001`。
 
 ## 4. Socket.io 事件（最终草案）
 ### 4.1 Client -> Server
@@ -417,9 +427,15 @@ CHANGELOG
   "room_id": "r_1001",
   "session_id": "s_1234",
   "last_seq": 1011,
-  "reconnect_token": "recon_xxx"
+  "reconnect_token": "recon_xxx",
+  "device_id": "dev_001",
+  "install_id": "install_001",
+  "seat_intent": 1
 }
 ```
+- 约束：
+  - `last_seq`表示客户端已确认处理的最后关键事件序号；服务端只回放更大的`seq`。
+  - `seat_intent`可为空；为空表示恢复到听众态，非空表示优先尝试恢复原麦位意图。
 
 ### 4.2 Server -> Client
 - `room.joined`：入房成功，返回在线人数、麦位、榜单快照
@@ -440,10 +456,18 @@ CHANGELOG
   "resume_ok": true,
   "need_resubscribe": false,
   "need_snapshot_pull": false,
+  "rejoin_required": false,
+  "last_seq": 1015,
+  "expires_at": "2026-03-31T10:00:30.000Z",
+  "seat_resume": {
+    "seat_no": 1,
+    "status": "RESTORED"
+  },
   "missed_events": []
 }
 ```
 - `room.recover_hint`：提示客户端拉`/sessions/{id}/recover`补偿
+- `room.recover_hint`最少返回：`session_id`, `reason`, `recover_endpoint`
 
 ### 4.3 时序约束
 1. `gift.send`必须先落订单再广播，不允许“已广播未落单”。
@@ -453,6 +477,8 @@ CHANGELOG
 5. `gift.rejected`仅在订单未进入`ACCEPTED`前返回；若已进入`ACCEPTED`但客户端未收到事件，必须通过`GET /orders/gift/{order_id}`补偿。
 6. `rtc.degrade.applied`触发后，服务端需在同一会话内同步`rtc.subscription_plan`，客户端据此调整订阅。
 7. 麦位释放必须先广播`rtc.seat.updated`再回收`producer`，避免听众侧残留僵尸订阅。
+8. `session.reconnected.rejoin_required=true`时，客户端必须终止本次恢复并自动走重新入房；不得停留在半恢复状态。
+9. `session.reconnected.last_seq`是新的恢复游标，客户端收到后必须覆盖本地旧值，作为下一次断线恢复基线。
 
 ## 5. 错误码（扩展到REQ-004）
 | 错误码 | HTTP/事件 | 含义 | 客户端动作 |
@@ -484,6 +510,7 @@ CHANGELOG
 | RECON_002 | 404 | session不存在 | 降级重新入房 |
 | RECON_003 | 410 | 超过30秒恢复窗口 | 降级重新入房 |
 | RECON_004 | 409 | 会话迁移需重订阅 | 拉恢复快照后重订阅 |
+| RECON_005 | 409 | 原麦位无法恢复 | 回到听众态并提示重新申请麦位 |
 | RISK_001 | 429 | 触发分钟级送礼限额 | 冷却后重试 |
 | RISK_002 | 403 | 命中设备/账号黑名单 | 阻断并提示申诉 |
 | RISK_003 | 403 | 异常IP/设备聚类命中 | 二次校验或阻断 |
@@ -524,6 +551,12 @@ REQ-003关键映射：
 - 30秒窗口重连成功率 >= 85%
 - 重连恢复时长：平均 <= 8秒，P95 <= 15秒
 - 重连后关键状态一致性（麦位/榜单/礼物订单）>= 99.9%
+
+REQ-004关键映射：
+- P-004-01/02：`session.reconnect` + `session.reconnected` + `/sessions/{session_id}/recover`
+- P-004-03：`RECON_003` + `session.reconnected.rejoin_required=true`
+- P-004-04：`room.recover_hint` + `rtc.subscription_plan`
+- P-004-05：`RECON_004/005` + `rtc.seat.updated`
 
 ### 6.5 埋点事件
 - `auth_login_success_total`

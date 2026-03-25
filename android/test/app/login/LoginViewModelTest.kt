@@ -276,6 +276,155 @@ class LoginViewModelTest {
         assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("rtc.degrade.applied") })
     }
 
+    @Test
+    fun `rtc seat conflict surfaces RTC_003 error`() = runTest {
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway().apply {
+            nextSeatConflict = true
+        }
+        val viewModel = buildViewModel(
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onPhoneChanged("+971500000111")
+        viewModel.onOtpChanged("123456")
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        viewModel.onJoinRoomClicked("room-001")
+        advanceUntilIdle()
+        viewModel.onCreateRtcTransportClicked()
+        advanceUntilIdle()
+        viewModel.onConnectRtcTransportClicked()
+        advanceUntilIdle()
+        viewModel.onPublishSeatClicked(1)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value.errorMessage?.contains("RTC_003") == true)
+        assertEquals(null, viewModel.uiState.value.rtcProducerId)
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("rtc.seat.updated") })
+    }
+
+    @Test
+    fun `rtc publish rejects invalid seat number`() = runTest {
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway()
+        val viewModel = buildViewModel(
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onPhoneChanged("+971500000112")
+        viewModel.onOtpChanged("123456")
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        viewModel.onJoinRoomClicked("room-001")
+        advanceUntilIdle()
+        viewModel.onCreateRtcTransportClicked()
+        advanceUntilIdle()
+        viewModel.onConnectRtcTransportClicked()
+        advanceUntilIdle()
+        viewModel.onPublishSeatClicked(9)
+        advanceUntilIdle()
+
+        assertEquals("seat_no must be 1..8.", viewModel.uiState.value.errorMessage)
+        assertEquals(null, viewModel.uiState.value.rtcProducerId)
+    }
+
+    @Test
+    fun `rtc plan and metrics load update ui state`() = runTest {
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway()
+        val viewModel = buildViewModel(
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onPhoneChanged("+971500000113")
+        viewModel.onOtpChanged("123456")
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        viewModel.onJoinRoomClicked("room-001")
+        advanceUntilIdle()
+        viewModel.onLoadRtcPlanClicked()
+        advanceUntilIdle()
+        viewModel.onLoadRtcMetricsClicked()
+        advanceUntilIdle()
+
+        assertEquals(8, viewModel.uiState.value.rtcSubscriptionLimit)
+        assertEquals("FULL_8", viewModel.uiState.value.rtcDegradeLevel)
+        assertTrue(viewModel.uiState.value.rtcActiveSpeakers.isNotEmpty())
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("rtc.plan") })
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("rtc.metrics") })
+    }
+
+    @Test
+    fun `reconnect within window restores session and pulls snapshot`() = runTest {
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway()
+        val viewModel = buildViewModel(
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onPhoneChanged("+971500000114")
+        viewModel.onOtpChanged("123456")
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        viewModel.onJoinRoomClicked("room-001")
+        advanceUntilIdle()
+        assertNotNull(viewModel.uiState.value.reconnectToken)
+        assertNotNull(fakeRooms.lastReconnectTokenCall)
+
+        viewModel.onDisconnected()
+        advanceUntilIdle()
+        viewModel.onConnected()
+        advanceUntilIdle()
+
+        assertEquals("RECOVERED", viewModel.uiState.value.reconnectState)
+        assertFalse(viewModel.uiState.value.reconnectPending)
+        assertEquals("recon-fake-token", viewModel.uiState.value.reconnectToken)
+        assertNotNull(fakeRooms.lastRecoverSnapshotCall)
+        assertEquals("sess-room-fake", realtime.lastReconnectCommand?.sessionId)
+    }
+
+    @Test
+    fun `reconnect over window re-joins room automatically`() = runTest {
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway()
+        val viewModel = buildViewModel(
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onPhoneChanged("+971500000115")
+        viewModel.onOtpChanged("123456")
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        viewModel.onJoinRoomClicked("room-001")
+        advanceUntilIdle()
+        viewModel.onCreateRtcTransportClicked()
+        advanceUntilIdle()
+        viewModel.onConnectRtcTransportClicked()
+        advanceUntilIdle()
+        viewModel.onPublishSeatClicked(1)
+        advanceUntilIdle()
+        viewModel.onLoadGiftsClicked("room-001")
+        advanceUntilIdle()
+
+        viewModel.onDisconnected()
+        advanceUntilIdle()
+        viewModel.onConnected()
+        advanceUntilIdle()
+
+        assertEquals("CONNECTED", viewModel.uiState.value.reconnectState)
+        assertFalse(viewModel.uiState.value.reconnectPending)
+        assertTrue(fakeRooms.lastJoinTokenCall != null)
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("room.joined") })
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("session.reconnect") })
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("reconnect.token") })
+    }
+
     private fun buildViewModel(
         authRepository: AuthRepository = FakeAuthRepository(),
         roomRepository: RoomRepository = FakeRoomRepository(),
@@ -368,15 +517,60 @@ private class FakeRoomRepository : RoomRepository {
         val installId: String,
     )
 
+    data class ReconnectTokenCall(
+        val accessToken: String,
+        val roomId: String,
+        val sessionId: String,
+        val deviceId: String,
+        val installId: String,
+        val seatIntent: Int?,
+    )
+
+    data class RecoverSnapshotCall(
+        val accessToken: String,
+        val sessionId: String,
+    )
+
     private val rooms = mutableListOf(
         RoomPreview("room-001", "MENA Chill Lounge", "Nora", 72),
         RoomPreview("room-002", "Night Owl Talk", "Omar", 48),
     )
     var lastJoinTokenCall: JoinTokenCall? = null
         private set
+    var lastReconnectTokenCall: ReconnectTokenCall? = null
+        private set
+    var lastRecoverSnapshotCall: RecoverSnapshotCall? = null
+        private set
     val joinTokenResult = JoinTokenResult(
         joinToken = "jt-fake-token",
         sessionId = "sess-room-fake",
+    )
+    val reconnectTokenResult = ReconnectTokenResult(
+        roomId = "room-001",
+        sessionId = "sess-room-fake",
+        reconnectToken = "recon-fake-token",
+        expiresAt = "2026-03-25T10:00:30.000Z",
+    )
+    val reconnectSnapshotResult = ReconnectSnapshotResult(
+        roomId = "room-001",
+        sessionId = "sess-room-fake",
+        snapshotSeq = 4,
+        seatState = ReconnectSnapshotSeatState(
+            seatNo = 1,
+            seatStatus = "RESTORED",
+            uid = "u_sender",
+            producerId = "pd-001",
+            errorCode = null,
+        ),
+        seatIntent = 1,
+        subscriptionLimit = 8,
+        degradeLevel = "FULL_8",
+        activeSpeakers = listOf("u_sender"),
+        leaderboard = listOf(LeaderboardEntry("u_sender", 100L)),
+        giftOrders = listOf("gft-001:FINALIZED"),
+        resumeCursor = 4,
+        needResubscribe = false,
+        rejoinRequired = false,
     )
 
     override suspend fun fetchRecommendedRooms(accessToken: String): List<RoomPreview> {
@@ -417,6 +611,36 @@ private class FakeRoomRepository : RoomRepository {
             installId = installId,
         )
         return joinTokenResult
+    }
+
+    override suspend fun issueReconnectToken(
+        accessToken: String,
+        roomId: String,
+        sessionId: String,
+        deviceId: String,
+        installId: String,
+        seatIntent: Int?,
+    ): ReconnectTokenResult {
+        lastReconnectTokenCall = ReconnectTokenCall(
+            accessToken = accessToken,
+            roomId = roomId,
+            sessionId = sessionId,
+            deviceId = deviceId,
+            installId = installId,
+            seatIntent = seatIntent,
+        )
+        return reconnectTokenResult.copy(roomId = roomId, sessionId = sessionId)
+    }
+
+    override suspend fun recoverReconnectSnapshot(
+        accessToken: String,
+        sessionId: String,
+    ): ReconnectSnapshotResult {
+        lastRecoverSnapshotCall = RecoverSnapshotCall(
+            accessToken = accessToken,
+            sessionId = sessionId,
+        )
+        return reconnectSnapshotResult.copy(sessionId = sessionId)
     }
 
     override suspend fun fetchGiftCatalog(
@@ -464,6 +688,7 @@ private class FakeDeviceInfoProvider : DeviceInfoProvider {
 private class FakeRealtimeGateway : RealtimeRoomGateway {
     private var listener: RealtimeRoomListener? = null
     var nextGiftRejected: GiftRejectedEvent? = null
+    var nextSeatConflict: Boolean = false
     var connectCalls: Int = 0
         private set
     var disconnectCalls: Int = 0
@@ -477,6 +702,8 @@ private class FakeRealtimeGateway : RealtimeRoomGateway {
     var lastProducerId: String? = null
         private set
     var lastConsumerId: String? = null
+        private set
+    var lastReconnectCommand: SessionReconnectCommand? = null
         private set
     val sentGiftCommands = mutableListOf<GiftSendCommand>()
 
@@ -560,6 +787,27 @@ private class FakeRealtimeGateway : RealtimeRoomGateway {
     }
 
     override fun produceAudio(command: RtcProduceCommand) {
+        if (nextSeatConflict) {
+            nextSeatConflict = false
+            listener?.onRtcSeatUpdated(
+                RtcSeatUpdatedEvent(
+                    roomId = "room-001",
+                    seatNo = command.seatNo,
+                    seatStatus = "OCCUPIED",
+                    uid = "u_sender",
+                    producerId = "pd-occupied",
+                    action = "CONFLICT",
+                    errorCode = "RTC_003",
+                ),
+            )
+            listener?.onRtcError(
+                RtcErrorEvent(
+                    errorCode = "RTC_003",
+                    message = "seat is occupied.",
+                ),
+            )
+            return
+        }
         lastProducerId = "pd-001"
         listener?.onRtcSeatUpdated(
             RtcSeatUpdatedEvent(
@@ -607,6 +855,43 @@ private class FakeRealtimeGateway : RealtimeRoomGateway {
                     degradeLevel = "DEGRADED_6",
                     reason = "packet_loss_high",
                     recoverEtaSec = 15,
+                ),
+            )
+        }
+    }
+
+    override fun reconnectSession(command: SessionReconnectCommand) {
+        lastReconnectCommand = command
+        val rejoinRequired = command.lastSeq >= 4
+        listener?.onSessionReconnected(
+            SessionReconnectedEvent(
+                roomId = command.roomId,
+                sessionId = command.sessionId,
+                resumeOk = !rejoinRequired,
+                needResubscribe = !rejoinRequired,
+                needSnapshotPull = !rejoinRequired,
+                rejoinRequired = rejoinRequired,
+                lastSeq = command.lastSeq + 1,
+                expiresAt = "2026-03-25T10:00:30.000Z",
+                seatNo = if (rejoinRequired) null else 1,
+                seatStatus = if (rejoinRequired) "LOST" else "RESTORED",
+                errorCode = if (rejoinRequired) "RECON_003" else null,
+                reason = if (rejoinRequired) "window expired" else null,
+            ),
+        )
+        if (!rejoinRequired) {
+            listener?.onRoomRecoverHint(
+                RoomRecoverHintEvent(
+                    sessionId = command.sessionId,
+                    reason = "snapshot_pull_required",
+                    recoverEndpoint = "/api/v1/sessions/${command.sessionId}/recover",
+                ),
+            )
+        } else {
+            listener?.onRtcError(
+                RtcErrorEvent(
+                    errorCode = "RECON_003",
+                    message = "recover window expired.",
                 ),
             )
         }

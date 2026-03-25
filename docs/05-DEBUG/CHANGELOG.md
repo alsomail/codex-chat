@@ -1,5 +1,5 @@
-# CHANGELOG.md v0.3
-*更新：2026-03-25 13:18 | 状态：🟢review | 维护者：@documentor*
+# CHANGELOG.md v0.5
+*更新：2026-03-25 22:54 | 状态：🟢review | 维护者：@documentor*
 
 ## 文档同步日志
 - 2026-03-24 13:31（UTC+8）初始化变更日志文件，用于记录 `sprint-01` 事件驱动的文档更新。
@@ -38,3 +38,13 @@
 - [收尾归档] REQ-002完成文档沉淀
 - 消息：REQ002-EVENT-DOC-001 / 来源：documentor
 - 内容：新增“REQ-002收尾复盘”，归档建房/入房/送礼闭环、幂等与风控验证、Android时序一致性结论；`DEMAND_ENTRANCE`同步更新收尾状态。
+
+### 文档同步（2026-03-25 21:17）
+- [文档沉淀] REQ-003阶段验收归档与口径对齐
+- 消息：REQ003-EVENT-DOC-001 / 来源：documentor
+- 内容：`DEBUG_NOTES.md v0.7`新增“REQ-003 文档沉淀”，归档Service/Android/压测脚本与联调结论、阶段结论、未完成项与下一步建议；同步最小修正`DEMAND_ENTRANCE.md`，将`REQ-003`统一表述为“`CONDITIONAL PASS（阶段验收通过）`已归档，补证项继续跟踪”。
+
+### 文档同步（2026-03-25 22:54）
+- [文档收尾] REQ-004最小闭环验收后沉淀完成
+- 消息：REQ004-EVENT-DOC-001 / 来源：documentor
+- 内容：`DEBUG_NOTES.md v0.8`新增“REQ-004 最小闭环收尾复盘”，沉淀窗口内恢复、超窗降级、原麦位不可恢复、Android重连状态机、关键补偿边界与后续补证项；`CHANGELOG`同步记录最小闭环交付，便于后续真机录屏与跨 Worker 补证延续。

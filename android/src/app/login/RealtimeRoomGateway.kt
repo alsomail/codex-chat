@@ -100,6 +100,34 @@ data class GiftRejectedEvent(
     val giftOrderId: String?,
 )
 
+data class SessionReconnectCommand(
+    val roomId: String,
+    val sessionId: String,
+    val reconnectToken: String,
+    val lastSeq: Long,
+)
+
+data class SessionReconnectedEvent(
+    val roomId: String,
+    val sessionId: String,
+    val resumeOk: Boolean,
+    val needResubscribe: Boolean,
+    val needSnapshotPull: Boolean,
+    val rejoinRequired: Boolean,
+    val lastSeq: Long,
+    val expiresAt: String,
+    val seatNo: Int?,
+    val seatStatus: String,
+    val errorCode: String?,
+    val reason: String?,
+)
+
+data class RoomRecoverHintEvent(
+    val sessionId: String,
+    val reason: String,
+    val recoverEndpoint: String,
+)
+
 interface RealtimeRoomListener {
     fun onConnected()
     fun onDisconnected()
@@ -117,6 +145,8 @@ interface RealtimeRoomListener {
     fun onRtcDegradeApplied(event: RtcDegradeAppliedEvent)
     fun onRtcDegradeRecovered(event: RtcDegradeRecoveredEvent)
     fun onRtcSeatUpdated(event: RtcSeatUpdatedEvent)
+    fun onSessionReconnected(event: SessionReconnectedEvent)
+    fun onRoomRecoverHint(event: RoomRecoverHintEvent)
     fun onRtcError(event: RtcErrorEvent)
     fun onError(message: String)
 }
@@ -166,6 +196,7 @@ interface RealtimeRoomGateway {
     fun connectRtcTransport(command: RtcConnectTransportCommand)
     fun produceAudio(command: RtcProduceCommand)
     fun consumeAudio(command: RtcConsumeCommand)
+    fun reconnectSession(command: SessionReconnectCommand)
     fun disconnect()
 }
 
@@ -223,6 +254,15 @@ class NoopRealtimeRoomGateway : RealtimeRoomGateway {
     }
 
     override fun consumeAudio(command: RtcConsumeCommand) {
+        listener?.onRtcError(
+            RtcErrorEvent(
+                errorCode = "SYS_001",
+                message = "Realtime gateway is unavailable.",
+            ),
+        )
+    }
+
+    override fun reconnectSession(command: SessionReconnectCommand) {
         listener?.onRtcError(
             RtcErrorEvent(
                 errorCode = "SYS_001",
@@ -449,6 +489,38 @@ class SocketIoRealtimeRoomGateway(
                 )
             }
         }
+        instance.on("session.reconnected") { args ->
+            parseJsonObject(args)?.let { payload ->
+                val seatResume = payload.optJSONObject("seat_resume")
+                this.listener?.onSessionReconnected(
+                    SessionReconnectedEvent(
+                        roomId = payload.optString("room_id"),
+                        sessionId = payload.optString("session_id"),
+                        resumeOk = payload.optBoolean("resume_ok"),
+                        needResubscribe = payload.optBoolean("need_resubscribe"),
+                        needSnapshotPull = payload.optBoolean("need_snapshot_pull"),
+                        rejoinRequired = payload.optBoolean("rejoin_required"),
+                        lastSeq = payload.optLong("last_seq"),
+                        expiresAt = payload.optString("expires_at"),
+                        seatNo = seatResume?.optInt("seat_no")?.takeIf { it > 0 },
+                        seatStatus = seatResume?.optString("seat_status").orEmpty(),
+                        errorCode = payload.optString("error_code").takeIf { it.isNotBlank() },
+                        reason = payload.optString("message").takeIf { it.isNotBlank() },
+                    ),
+                )
+            }
+        }
+        instance.on("room.recover_hint") { args ->
+            parseJsonObject(args)?.let { payload ->
+                this.listener?.onRoomRecoverHint(
+                    RoomRecoverHintEvent(
+                        sessionId = payload.optString("session_id"),
+                        reason = payload.optString("reason"),
+                        recoverEndpoint = payload.optString("recover_endpoint"),
+                    ),
+                )
+            }
+        }
         instance.on("rtc.error") { args ->
             val payload = parseJsonObject(args)
             this.listener?.onRtcError(
@@ -554,6 +626,18 @@ class SocketIoRealtimeRoomGateway(
                         },
                     )
                 }
+            },
+        )
+    }
+
+    override fun reconnectSession(command: SessionReconnectCommand) {
+        socket?.emit(
+            "session.reconnect",
+            JSONObject().apply {
+                put("room_id", command.roomId)
+                put("session_id", command.sessionId)
+                put("reconnect_token", command.reconnectToken)
+                put("last_seq", command.lastSeq)
             },
         )
     }

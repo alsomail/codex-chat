@@ -565,6 +565,12 @@ data class LoginUiState(
     val realtimeConnected: Boolean = false,
     val sessionId: String? = null,
     val activeRoomId: String? = null,
+    val reconnectToken: String? = null,
+    val reconnectExpiresAt: String? = null,
+    val reconnectLastSeq: Long = 0L,
+    val reconnectSeatIntent: Int? = null,
+    val reconnectState: String = "CONNECTED",
+    val reconnectPending: Boolean = false,
     val createRoomTopic: String = "Night Owl Talk",
     val createRoomVisibility: String = "PUBLIC",
     val giftTargetUid: String = "u_host",
@@ -637,6 +643,37 @@ data class RoomCreateResult(
 data class JoinTokenResult(
     val joinToken: String,
     val sessionId: String,
+)
+
+data class ReconnectTokenResult(
+    val roomId: String,
+    val sessionId: String,
+    val reconnectToken: String,
+    val expiresAt: String,
+)
+
+data class ReconnectSnapshotSeatState(
+    val seatNo: Int?,
+    val seatStatus: String,
+    val uid: String?,
+    val producerId: String?,
+    val errorCode: String?,
+)
+
+data class ReconnectSnapshotResult(
+    val roomId: String,
+    val sessionId: String,
+    val snapshotSeq: Long,
+    val seatState: ReconnectSnapshotSeatState,
+    val seatIntent: Int?,
+    val subscriptionLimit: Int,
+    val degradeLevel: String,
+    val activeSpeakers: List<String>,
+    val leaderboard: List<LeaderboardEntry>,
+    val giftOrders: List<String>,
+    val resumeCursor: Long,
+    val needResubscribe: Boolean,
+    val rejoinRequired: Boolean,
 )
 
 data class RechargeVerifyResult(
@@ -1059,6 +1096,9 @@ class LoginViewModel(
             mutableUiState.update { it.copy(errorMessage = "seat_no must be 1..8.") }
             return
         }
+        mutableUiState.update {
+            it.copy(reconnectSeatIntent = seatNo, errorMessage = null)
+        }
         realtimeGateway.produceAudio(
             RtcProduceCommand(
                 transportId = transportId,
@@ -1242,11 +1282,17 @@ class LoginViewModel(
         dispatchUiUpdate {
             it.copy(realtimeConnected = true, statusMessage = "Socket connected.")
         }
+        maybeReconnectRoom()
     }
 
     override fun onDisconnected() {
         dispatchUiUpdate {
-            it.copy(realtimeConnected = false, statusMessage = "Socket disconnected.")
+            it.copy(
+                realtimeConnected = false,
+                reconnectPending = true,
+                reconnectState = "RECONNECTING",
+                statusMessage = "Socket disconnected, waiting reconnect.",
+            )
         }
     }
 
@@ -1254,6 +1300,9 @@ class LoginViewModel(
         dispatchUiUpdate {
             it.copy(
                 activeRoomId = event.roomId,
+                sessionId = event.sessionId,
+                reconnectToken = null,
+                reconnectLastSeq = 0L,
                 rtcTransportId = null,
                 rtcProducerId = null,
                 rtcConsumerId = null,
@@ -1262,9 +1311,13 @@ class LoginViewModel(
                 rtcSubscriptionLimit = 8,
                 statusMessage = "room.joined session=${event.sessionId}",
                 errorMessage = null,
+                reconnectPending = false,
+                reconnectState = "CONNECTED",
+                reconnectExpiresAt = null,
             )
         }
         appendEvent("room.joined -> online=${event.onlineCount}")
+        refreshReconnectToken(event.roomId, event.sessionId)
     }
 
     override fun onRoomJoinFailed(errorCode: String, message: String) {
@@ -1396,13 +1449,60 @@ class LoginViewModel(
                 it.copy(rtcProducerId = null)
             }
         }
+        if (event.action == "OCCUPIED") {
+            dispatchUiUpdate {
+                it.copy(reconnectSeatIntent = event.seatNo)
+            }
+        }
         appendEvent("rtc.seat.updated -> seat=${event.seatNo} action=${event.action}")
+    }
+
+    override fun onSessionReconnected(event: SessionReconnectedEvent) {
+        dispatchUiUpdate {
+            it.copy(
+                reconnectPending = false,
+                reconnectState = if (event.resumeOk) "RECOVERED" else "REJOIN_REQUIRED",
+                reconnectLastSeq = event.lastSeq,
+                reconnectExpiresAt = event.expiresAt,
+                statusMessage = if (event.resumeOk) {
+                    "session.reconnected ${event.sessionId}"
+                } else {
+                    "session.reconnected requires rejoin"
+                },
+                errorMessage = event.errorCode?.let { code -> "$code: ${event.reason ?: "reconnect failed"}" },
+            )
+        }
+        appendEvent("session.reconnected -> resume=${event.resumeOk} seq=${event.lastSeq}")
+        if (event.rejoinRequired || !event.resumeOk) {
+            rejoinRoomAfterReconnect(event.roomId)
+            return
+        }
+        if (event.needSnapshotPull || event.needResubscribe) {
+            refreshReconnectSnapshot(event.sessionId)
+        }
+    }
+
+    override fun onRoomRecoverHint(event: RoomRecoverHintEvent) {
+        appendEvent("room.recover_hint -> ${event.reason}")
+        val session = tokenStore.latest()
+        if (session == null) {
+            return
+        }
+        val currentSessionId = uiState.value.sessionId
+        if (currentSessionId.isNullOrBlank()) {
+            return
+        }
+        if (currentSessionId != event.sessionId) {
+            return
+        }
+        refreshReconnectSnapshot(event.sessionId)
     }
 
     override fun onRtcError(event: RtcErrorEvent) {
         dispatchUiUpdate {
             it.copy(
                 errorMessage = "${event.errorCode}: ${event.message}",
+                reconnectState = if (event.errorCode.startsWith("RECON_")) "REJOIN_REQUIRED" else it.reconnectState,
             )
         }
         appendEvent("rtc.error -> ${event.errorCode}")
@@ -1436,10 +1536,118 @@ class LoginViewModel(
 
     private fun appendEvent(message: String) {
         dispatchUiUpdate {
-            val logLine = "[${System.currentTimeMillis()}] $message"
+            val nextSeq = it.reconnectLastSeq + 1
+            val logLine = "[${System.currentTimeMillis()}][seq=$nextSeq] $message"
             val logs = (it.eventLogs + logLine).takeLast(40)
-            it.copy(eventLogs = logs)
+            it.copy(eventLogs = logs, reconnectLastSeq = nextSeq)
         }
+    }
+
+    private fun maybeReconnectRoom() {
+        val snapshot = uiState.value
+        if (!snapshot.reconnectPending) {
+            return
+        }
+        if (snapshot.activeRoomId.isNullOrBlank()) {
+            return
+        }
+        if (snapshot.sessionId.isNullOrBlank()) {
+            return
+        }
+        if (snapshot.reconnectToken.isNullOrBlank()) {
+            return
+        }
+
+        realtimeGateway.reconnectSession(
+            SessionReconnectCommand(
+                roomId = snapshot.activeRoomId,
+                sessionId = snapshot.sessionId,
+                reconnectToken = snapshot.reconnectToken,
+                lastSeq = snapshot.reconnectLastSeq,
+            ),
+        )
+        appendEvent("session.reconnect -> ${snapshot.sessionId}")
+    }
+
+    private fun refreshReconnectToken(roomId: String, sessionId: String) {
+        val session = tokenStore.latest() ?: return
+        val deviceId = activeDeviceId ?: return
+        viewModelScope.launch {
+            runCatching {
+                roomRepository.issueReconnectToken(
+                    accessToken = session.accessToken,
+                    roomId = roomId,
+                    sessionId = sessionId,
+                    deviceId = deviceId,
+                    installId = "android_install_main",
+                    seatIntent = uiState.value.reconnectSeatIntent,
+                )
+            }.onSuccess { token ->
+                mutableUiState.update {
+                    it.copy(
+                        reconnectToken = token.reconnectToken,
+                        reconnectExpiresAt = token.expiresAt,
+                        reconnectState = "CONNECTED",
+                    )
+                }
+                appendEvent("reconnect.token -> ${token.expiresAt}")
+                if (uiState.value.reconnectPending) {
+                    maybeReconnectRoom()
+                }
+            }.onFailure { throwable ->
+                dispatchUiUpdate {
+                    it.copy(errorMessage = throwable.message ?: genericError)
+                }
+            }
+        }
+    }
+
+    private fun refreshReconnectSnapshot(sessionId: String) {
+        val session = tokenStore.latest() ?: return
+        viewModelScope.launch {
+            runCatching {
+                roomRepository.recoverReconnectSnapshot(
+                    accessToken = session.accessToken,
+                    sessionId = sessionId,
+                )
+            }.onSuccess { snapshot ->
+                mutableUiState.update {
+                    it.copy(
+                        rtcSubscriptionLimit = snapshot.subscriptionLimit,
+                        rtcDegradeLevel = snapshot.degradeLevel,
+                        rtcActiveSpeakers = snapshot.activeSpeakers,
+                        rtcProducerId = snapshot.seatState.producerId,
+                        reconnectLastSeq = snapshot.resumeCursor,
+                        reconnectState = if (snapshot.rejoinRequired) "REJOIN_REQUIRED" else "RECOVERED",
+                        statusMessage = "reconnect snapshot ${snapshot.snapshotSeq}",
+                        errorMessage = null,
+                    )
+                }
+                appendEvent("reconnect.snapshot -> seq=${snapshot.snapshotSeq}")
+            }.onFailure { throwable ->
+                dispatchUiUpdate {
+                    it.copy(errorMessage = throwable.message ?: genericError)
+                }
+            }
+        }
+    }
+
+    private fun rejoinRoomAfterReconnect(roomId: String) {
+        if (roomId.isBlank()) {
+            return
+        }
+        val current = uiState.value
+        if (current.reconnectState == "REJOIN_REQUIRED" && current.reconnectPending) {
+            return
+        }
+        dispatchUiUpdate {
+            it.copy(
+                reconnectPending = true,
+                reconnectState = "REJOIN_REQUIRED",
+                statusMessage = "Rejoining room after reconnect failure.",
+            )
+        }
+        onJoinRoomClicked(roomId)
     }
 }
 
@@ -1493,6 +1701,24 @@ interface RoomRepository {
         installId: String,
     ): JoinTokenResult {
         throw UnsupportedOperationException("Join token API is not available.")
+    }
+
+    suspend fun issueReconnectToken(
+        accessToken: String,
+        roomId: String,
+        sessionId: String,
+        deviceId: String,
+        installId: String,
+        seatIntent: Int?,
+    ): ReconnectTokenResult {
+        throw UnsupportedOperationException("Reconnect token API is not available.")
+    }
+
+    suspend fun recoverReconnectSnapshot(
+        accessToken: String,
+        sessionId: String,
+    ): ReconnectSnapshotResult {
+        throw UnsupportedOperationException("Reconnect snapshot API is not available.")
     }
 
     suspend fun fetchGiftCatalog(
@@ -1666,6 +1892,106 @@ class NetworkRoomRepository(
         JoinTokenResult(
             joinToken = data.optString("join_token"),
             sessionId = data.optString("session_id"),
+        )
+    }
+
+    override suspend fun issueReconnectToken(
+        accessToken: String,
+        roomId: String,
+        sessionId: String,
+        deviceId: String,
+        installId: String,
+        seatIntent: Int?,
+    ): ReconnectTokenResult = withContext(Dispatchers.IO) {
+        val response = httpPost(
+            url = "$baseUrl/api/v1/rooms/$roomId/reconnect-token",
+            accessToken = accessToken,
+            body = JSONObject().apply {
+                put("session_id", sessionId)
+                put("device_id", deviceId)
+                put("install_id", installId)
+                if (seatIntent != null) {
+                    put("seat_intent", seatIntent)
+                }
+            },
+        )
+        val data = parseEnvelope(parseRoot(response))
+        ReconnectTokenResult(
+            roomId = data.optString("room_id"),
+            sessionId = data.optString("session_id"),
+            reconnectToken = data.optString("reconnect_token"),
+            expiresAt = data.optString("expires_at"),
+        )
+    }
+
+    override suspend fun recoverReconnectSnapshot(
+        accessToken: String,
+        sessionId: String,
+    ): ReconnectSnapshotResult = withContext(Dispatchers.IO) {
+        val response = httpPost(
+            url = "$baseUrl/api/v1/sessions/$sessionId/recover",
+            accessToken = accessToken,
+            body = JSONObject(),
+        )
+        val data = parseEnvelope(parseRoot(response))
+        val seatState = data.optJSONObject("seat_state")
+        val leaderboardArray = data.optJSONArray("leaderboard") ?: JSONArray()
+        val giftOrdersArray = data.optJSONArray("gift_orders") ?: JSONArray()
+        ReconnectSnapshotResult(
+            roomId = data.optString("room_id"),
+            sessionId = data.optString("session_id"),
+            snapshotSeq = data.optLong("snapshot_seq"),
+            seatState = ReconnectSnapshotSeatState(
+                seatNo = if (seatState?.has("seat_no") == true && !seatState.isNull("seat_no")) {
+                    seatState.optInt("seat_no")
+                } else {
+                    null
+                },
+                seatStatus = seatState?.optString("seat_status").orEmpty(),
+                uid = seatState?.optString("uid").takeIf { !it.isNullOrBlank() },
+                producerId = seatState?.optString("producer_id").takeIf { !it.isNullOrBlank() },
+                errorCode = seatState?.optString("error_code").takeIf { !it.isNullOrBlank() },
+            ),
+            seatIntent = if (data.has("seat_intent") && !data.isNull("seat_intent")) {
+                data.optInt("seat_intent")
+            } else {
+                null
+            },
+            subscriptionLimit = data.optJSONObject("subscription_plan")?.optInt("subscription_limit")
+                ?: data.optInt("subscription_limit"),
+            degradeLevel = data.optJSONObject("subscription_plan")?.optString("degrade_level")
+                ?: data.optString("degrade_level"),
+            activeSpeakers = buildList {
+                val speakers = data.optJSONObject("subscription_plan")?.optJSONArray("active_speakers")
+                    ?: data.optJSONArray("active_speakers")
+                    ?: JSONArray()
+                for (index in 0 until speakers.length()) {
+                    val uid = speakers.optString(index)
+                    if (uid.isNotBlank()) {
+                        add(uid)
+                    }
+                }
+            },
+            leaderboard = buildList {
+                for (index in 0 until leaderboardArray.length()) {
+                    val item = leaderboardArray.optJSONObject(index) ?: continue
+                    add(
+                        LeaderboardEntry(
+                            uid = item.optString("uid"),
+                            totalGold = item.optLong("total_gold"),
+                        ),
+                    )
+                }
+            },
+            giftOrders = buildList {
+                for (index in 0 until giftOrdersArray.length()) {
+                    val item = giftOrdersArray.optJSONObject(index) ?: continue
+                    add("${item.optString("gift_order_id")}:${item.optString("status")}")
+                }
+            },
+            resumeCursor = data.optLong("resume_cursor"),
+            needResubscribe = data.optBoolean("need_resubscribe"),
+            rejoinRequired = data.optBoolean("rejoin_required"),
         )
     }
 

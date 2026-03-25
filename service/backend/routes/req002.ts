@@ -496,6 +496,24 @@ export class Req002Service {
     return order;
   }
 
+  getRoomGiftOrdersSnapshot(roomId: string, limit = 5): Array<{
+    gift_order_id: string;
+    status: GiftOrderStatus;
+    amount_gold: number;
+    updated_at: string;
+  }> {
+    return Array.from(this.giftOrders.values())
+      .filter((order) => order.roomId === roomId)
+      .sort((left, right) => resolveOrderUpdatedAt(right).getTime() - resolveOrderUpdatedAt(left).getTime())
+      .slice(0, limit)
+      .map((order) => ({
+        gift_order_id: order.giftOrderId,
+        status: order.status,
+        amount_gold: order.amountGold,
+        updated_at: resolveOrderUpdatedAt(order).toISOString(),
+      }));
+  }
+
   sendGift(input: {
     uid: string;
     deviceId: string;

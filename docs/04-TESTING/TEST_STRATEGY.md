@@ -1,4 +1,4 @@
-# TEST_STRATEGY.md v0.5 - REQ-001~004 MVP测试策略
+# TEST_STRATEGY.md v1.0 - REQ-001~004 MVP测试策略
 *更新：2026-03-25 | 状态：🟢review | Owner：@test_writer*
 
 ## CHANGELOG
@@ -7,6 +7,11 @@
 - v0.2 -> v0.3：新增`REQ-001/REQ-002 Android客户端验收清单映射`，明确客户端验收证据与执行批次。
 - v0.3 -> v0.4：完成`REQ-001` Android回归与`REQ-002`服务端/Socket/Android协议测试，补充测试批次与验收结论并推动流转。
 - v0.4 -> v0.5：对齐`PRD v0.8`新增`REQ-003` Android/Service验收清单，补充测试映射与执行批次要求。
+- v0.5 -> v0.6：启动`REQ-003`测试批次，补充边界/异常用例与执行范围说明。
+- v0.6 -> v0.7：补齐`REQ-003` Android端RTC边界用例，完成Service/Android单测与联调记录。
+- v0.7 -> v0.8：固化`REQ-003`压测脚本，完成Service+Socket真实环境100并发/弱网演练与Android联调回归。
+- v0.8 -> v0.9：记录`REQ-003`阶段性验收结论（暂定验收）。
+- v0.9 -> v1.0：新增`REQ-004`最小闭环验收批次，补充窗口内恢复/超窗重入房/恢复补偿结论与限制项。
 
 ## 1. 目标
 - 支撑PRD v0.8与API_SPEC v0.6验收。
@@ -148,3 +153,65 @@
 - RTC联调期：每日回归A-003关键链路（A-003-02/03/05）+ Service契约（S-003-01/02/04）
 - 压测窗口（M2）：执行S-003-06并输出可追溯压测报告与归因结论
 - 发布前：A-001 + A-002 + A-003全清单回归，证据归档到测试报告
+
+## 12. REQ-003 测试启动批次（2026-03-25）
+### 12.1 执行范围
+- Service自动化：`service/test/req003.test.ts`补充边界/异常用例（metrics时间窗校验、seat范围、rtp_capabilities为空）。
+- Socket协议回归：`service/test/req003.socket.test.ts`覆盖`rtc.create/connect/produce/consume`与降级事件链路。
+- Android单测：`android/test/app/login/LoginViewModelTest.kt`补充RTC冲突/非法seat/plan+metrics加载用例。
+
+### 12.2 通过情况
+- Service：`npm test`通过（27/27）。
+- Android：`./gradlew testDebugUnitTest`通过（BUILD SUCCESSFUL）。
+- Android联调：`Req003IntegrationTest`通过（`REQ003_INTEGRATION=1`，使用`SocketIoRealtimeRoomGateway + NetworkRoomRepository`对接本地服务端）。
+- 联调结论：双端契约对齐（plan/metrics字段、rtc事件链路），未发现契约不一致。
+
+### 12.3 真实环境（Service+Socket）100并发/弱网结果（REQ-003）
+- 环境：本地启动`chatroom-service`（`PORT=3100`），Socket.io 客户端模拟`8麦+92听众`，通过`/rtc/metrics`采样聚合。
+- 执行脚本：`service/tools/req003_load.js`（默认5分钟，30秒采样；可通过`REQ003_DURATION_SEC/REQ003_SAMPLE_INTERVAL_SEC`调整）。
+- 100并发（良好网络）：
+  - `points=6`，`latency_p95=185ms`，`jitter_p95=45ms`，`loss_ratio=0.02`，`stall_ms=80`
+  - `degrade_events=0`，`recover_ratio_15s=1.0`
+  - 结论：满足`P95 < 300ms`阈值（服务端指标口径）
+- 弱网（20%丢包+200ms抖动，10秒内恢复）：
+  - `points=2`，`latency_p95=500ms`，`jitter_p95=220ms`，`loss_ratio=0.2`，`stall_ms=1800`
+  - `degrade_events=1`，`recover_ratio_15s=1.0`
+  - 结论：降级触发与15秒内恢复指标满足（服务端指标口径）
+- 限制：未覆盖真实RTC媒体链路与SFU压测，仅验证Service侧事件链路与指标聚合。
+
+### 12.4 未完成项与下一步
+- 压测：执行S-003-06（真实RTC媒体链路，100并发5分钟）并输出可追溯报告。
+- 弱网专项：S-003-04/A-003-05（真实弱网注入）降级与恢复数据取证。
+- 指标验收：S-003-05指标聚合校验与`/rtc/metrics`样本留档。
+- 端到端联调：如需真机/模拟器回归，再补充Android仪器化联调证据。
+
+### 12.5 当前结论（REQ-003）
+- 结论：`CONDITIONAL PASS（暂定验收）`，允许进入下一阶段流转。
+- 仍需补齐：真实RTC媒体链路压测、弱网注入取证与指标留档。
+
+## 13. REQ-004 最小闭环验收批次（2026-03-25）
+### 13.1 执行范围
+- Service自动化：执行`service/test/req003.test.ts`中的`REQ-004 reconnect resumes inside window and returns recover snapshot`、`REQ-004 reconnect rejects expired window and unrecoverable seat`，以及`service/test/req003.socket.test.ts`中的`REQ-003 session reconnect emits recover hint and subscription plan`，覆盖窗口内恢复、超窗降级、麦位不可恢复、恢复补偿提示。
+- Android自动化：执行`android`模块`testDebugUnitTest`，覆盖`LoginViewModelTest`与`Req003IntegrationTest`中新增的 reconnect 状态机、`session.reconnect/session.reconnected/room.recover_hint` 接口适配与自动重入房流程。
+- 验收范围严格限定为`单Worker / 单房间 / Android真机 + service测试环境`中的“最小可执行闭环”；本批次未扩张到跨 Worker 自动恢复、真实媒体链路100并发重连压测或真机切网录屏取证。
+
+### 13.2 执行命令与结果
+- Service构建：`cd service && npm run build` -> `PASS`
+- Service定向测试：`cd service && /Applications/ServBay/bin/node --test --test-name-pattern "REQ-004|session reconnect" dist/test/req003.test.js dist/test/req003.socket.test.js` -> `PASS`
+- Android单测：`cd android && JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew testDebugUnitTest --no-daemon` -> `PASS`
+
+### 13.3 通过情况（REQ-004）
+- P-004-01/P-004-02 对应自动化验证通过：窗口内恢复能返回`session.reconnected`，并可通过`/sessions/{session_id}/recover`回补最小快照。
+- P-004-03 对应自动化验证通过：超过`30秒`恢复窗口时返回`RECON_003`并进入`rejoin_required`降级路径。
+- P-004-04 的最小状态机验证通过：Android侧已持有并消费`room_id/session_id/reconnect_token/last_seq/seat_intent`，断线后会自动触发`session.reconnect`并按结果恢复或重入房。
+- P-004-05 的核心一致性边界部分通过：`RECON_005`与`room.recover_hint`链路已覆盖“原麦位不可恢复”与“需补偿/重订阅提示”，未发现双会话或幽灵会话的自动化阻塞缺陷。
+- 契约一致性通过：`PRD`、`ARCHITECTURE`、`API_SPEC`、实现与自动化断言对`session.reconnect`、`session.reconnected`、`room.recover_hint`、`RECON_003/005`语义保持一致。
+
+### 13.4 证据与限制
+- 当前证据以Service定向自动化与Android本地单测为主，足以支撑“最小可执行闭环”验收。
+- 受本批次范围限制，`P-004-04/P-004-05`所要求的真机前后台录屏、Wi-Fi/4G真实切网录屏与服务端恢复日志尚未纳入本轮自动化证据。
+- 当前未发现需要将REQ-004打回`🔴 bug修复`的阻塞缺陷；但真实设备网络切换与跨 Worker 恢复仍应继续作为后续补证项跟踪。
+
+### 13.5 当前结论（REQ-004）
+- 结论：`CONDITIONAL PASS（最小闭环验收通过）`，允许按本周最小范围将`REQ-004`推进到`🟩已验收`。
+- 结论口径：本次“已验收”仅代表`单Worker / 单房间 / Android真机 + service测试环境`的最小恢复闭环达成，不外推为“多实例/真实切网/全量网络条件全部通过”。

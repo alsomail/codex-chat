@@ -487,13 +487,98 @@ sequenceDiagram
 | A-003-08 指标完整性 | `rtc_metric_minute` | 指标字段完整且可追溯 |
 | S-003-01~S-003-08 | 契约、降级、压测、故障演练 | 报告与日志证据必须与指标口径一致 |
 
-## 14. 需求映射
+## 14. REQ-004 架构专章（退出/掉线重连：30秒窗口）
+### 14.1 目标与冻结结论
+- 目标：冻结`单Worker / 单房间 / Android真机 + service测试环境`下的最小恢复闭环，支撑PRD §6.4 的窗口内恢复、超窗降级与关键状态一致性验收。
+- 冻结结论：`REQ-004`进入`🟢待开发`前置条件已满足；开发侧必须按本章的快照字段、恢复时序、错误码语义和发布边界实现，不得自行扩张为跨 Worker 自动恢复。
+- 设计边界：本周只覆盖房间信令与RTC会话恢复，不新增多实例漂移恢复、长后台保活、100并发重连压测能力。
+
+### 14.2 恢复域模型（冻结）
+| 领域对象 | 最小字段 | 说明 |
+|---|---|---|
+| `room_reconnect_session` | `room_id`, `session_id`, `uid`, `worker_id`, `socket_id`, `status`, `joined_at`, `disconnected_at`, `expires_at`, `updated_at` | 房间会话权威态；窗口内仍保留原会话归属 |
+| `room_reconnect_token` | `session_id`, `token_digest`, `issued_at`, `expires_at`, `renew_version`, `device_id`, `install_id` | 恢复凭证；按`session_id + renew_version`单活轮转 |
+| `room_session_snapshot` | `session_id`, `room_id`, `last_seq`, `seat_no`, `seat_intent`, `producer_id`, `consumer_ids`, `subscription_limit`, `degrade_level`, `leaderboard_version`, `last_gift_order_id`, `updated_at` | 用于恢复或超窗降级后的最小快照 |
+| `room_recover_event_log` | `room_id`, `seq`, `event_type`, `payload`, `created_at` | 关键事件补偿日志；只保留礼物最终态、榜单快照、麦位/订阅变化 |
+
+冻结规则：
+1. `room_id`在窗口期内仍绑定原`worker_id`，本周不支持切到新 worker 自动恢复。
+2. `reconnect_token`默认TTL固定`30秒`；每次成功恢复或主动续签都必须轮转，旧Token立刻失效。
+3. `last_seq`以`room_recover_event_log.seq`为准，客户端上报的是“已确认的最后事件序号”，服务端只回放`seq > last_seq`的关键事件。
+4. `room_session_snapshot`必须在信令断开时冻结，不得随着socket断开立即删除；超窗后才允许清理原恢复上下文。
+
+### 14.3 恢复状态机与时序（冻结）
+#### 14.3.1 服务端会话状态机
+- `CONNECTED -> RECONNECT_GRACE -> RECOVERED -> CONNECTED`
+- `CONNECTED -> RECONNECT_GRACE -> REJOIN_REQUIRED -> CLOSED`
+- 进入`RECONNECT_GRACE`条件：检测到Socket断连、App切后台导致信令断开、网络切换造成连接中断。
+- `RECONNECT_GRACE`保留时间固定`30秒`；窗口内不得释放麦位、订阅快照和最近礼物/榜单补偿信息。
+
+#### 14.3.2 客户端状态机
+- `CONNECTED -> RECONNECTING -> RECOVERED`
+- `CONNECTED -> RECONNECTING -> REJOIN_REQUIRED`
+- Android必须持有：`room_id`、`session_id`、`reconnect_token`、`last_seq`、`seat_intent`、最近一次`producer/consumer`上下文。
+- 若收到`RECON_003`或`session.reconnected.resume_ok=false`，客户端必须自动走重新入房，而不是停留在静默失败状态。
+
+#### 14.3.3 恢复时序（冻结）
+1. `room.joined`成功后，服务端签发`session_id + reconnect_token + expires_at`，客户端开始记录`last_seq`。
+2. 连接断开后，服务端把会话置为`RECONNECT_GRACE`，冻结`room_session_snapshot`并继续累积关键事件日志。
+3. 客户端重连后发送`session.reconnect(room_id, session_id, reconnect_token, last_seq)`。
+4. 服务端先校验`session_id -> worker_id`归属，再校验Token TTL、设备信息与窗口是否过期。
+5. 校验通过时优先恢复原会话：
+   - 若原`producer/consumer`仍可复用，返回`need_resubscribe=false`。
+   - 若媒体链路需重建但房间权威态仍有效，返回`need_resubscribe=true`并允许客户端拉恢复快照。
+6. 校验失败或窗口超时则返回`REJOIN_REQUIRED`语义：保留补偿所需的榜单/礼物结果，但要求重新入房。
+
+### 14.4 事件补偿边界（冻结）
+最小补偿范围：
+- `rtc.seat.updated`：保证麦位占用/释放与`seat_intent`一致，避免双占位。
+- `rtc.subscription_plan`：恢复后告知当前订阅路数、降级等级与优先级列表。
+- `gift.accepted` / `gift.broadcast`最终态：至少能补偿最近一次礼物订单最终结果。
+- `leaderboard.updated`快照：若客户端错过增量，允许直接回补当前榜单快照。
+
+补偿规则：
+1. `last_seq`仅用于关键事件补偿，不要求回放所有历史事件。
+2. 若`last_seq`落后过多或服务端判断增量回放成本过高，可返回`need_snapshot_pull=true`，客户端通过恢复接口拉全量最小快照。
+3. 超窗重入房时，不回放旧的RTC媒体事件，但必须补齐最近礼物订单最终态、当前榜单快照与麦位最终态。
+4. 若原麦位已被释放或迁移，服务端必须明确返回“麦位需重占”语义，不允许表现为恢复成功但实际上无法发声。
+
+### 14.5 单Worker优先与跨Worker后补边界（冻结）
+- 本周通过条件只要求`session_id`在原`worker_id`上恢复成功。
+- 若发现`worker_id`不匹配、原worker不可达或房间已迁移，统一按`RECON_004 / REJOIN_REQUIRED`降级，不纳入本周失败定义，但必须在文档和测试结论中显式标注“跨Worker未覆盖”。
+- 负载均衡层本周不得在恢复窗口内主动把同房请求漂移到新worker；如无法保证，开发实现需返回明确降级信号，而不是尝试隐式恢复。
+
+### 14.6 关键指标与发布门禁（冻结）
+核心指标：
+- `reconnect_attempt_total`
+- `reconnect_success_total`
+- `reconnect_rejoin_required_total`
+- `reconnect_window_expired_total`
+- `reconnect_recovery_duration_ms`
+- `reconnect_snapshot_pull_total`
+
+本周门禁：
+1. 30秒窗口内恢复成功率`>=85%`。
+2. 平均恢复时长`<=8秒`，P95 `<=15秒`。
+3. 恢复后关键状态一致性（麦位/订阅/礼物最终态/榜单快照）`>=99.9%`。
+4. 若`REQ-003`真实RTC媒体链路补证未完成，`REQ-004`只能按“单房真机恢复闭环通过”记录，不得外推到多实例或全量网络场景。
+
+### 14.7 A-004/S-004 验收映射（冻结）
+| 验收项 | 架构落点 | 强制约束 |
+|---|---|---|
+| P-004-01 断网5秒恢复 | `room_reconnect_session` + `session.reconnect` | 原会话恢复成功，关键状态不丢失 |
+| P-004-02 断网25秒恢复 | `room_session_snapshot` + `last_seq`回放 | 30秒窗口内仍能恢复，且补偿结果一致 |
+| P-004-03 断网35秒超窗 | `REJOIN_REQUIRED`降级路径 | 必须明确超窗，不得出现幽灵会话 |
+| P-004-04 后台25秒回前台 | 客户端重连状态机 + 快照补偿 | 不要求用户手动重走主流程 |
+| P-004-05 Wi-Fi/4G切换 | `room_reconnect_token`轮转 + 麦位一致性约束 | 不允许双会话、双占位或长期静音 |
+
+## 15. 需求映射
 - REQ-001 登录JWT -> API Gateway + PostgreSQL + Redis 会话。
 - REQ-002 创建/加入房间 -> Signaling + SFU 房间分配。
 - REQ-003 群聊音频（8麦） -> SFU Producer/Consumer 与客户端订阅策略。
 - REQ-004 退出/掉线重连 -> 客户端重连状态机 + 信令会话恢复。
 
-## 15. 里程碑建议
+## 16. 里程碑建议
 - M1（2天）：打通单房间入房、上麦、听众收听链路（20并发）。
 - M2（2天）：实现重连恢复、弱网降级、关键指标打点。
 - M3（1天）：压测至100并发，验证P95<300ms并输出报告。

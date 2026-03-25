@@ -274,3 +274,271 @@ test("REQ-003 rtc plan rejects non-members with ROOM_002", async () => {
     assert.equal(outsiderPlan.body.code, "ROOM_002");
   });
 });
+
+test("REQ-003 rtc metrics rejects inverted time range", async () => {
+  await withServer(async (baseUrl) => {
+    const ownerToken = await loginAndGetToken(baseUrl, "300004");
+
+    const createRoom = await postJson(
+      `${baseUrl}/api/v1/rooms`,
+      {
+        visibility: "PUBLIC",
+        topic: "REQ-003 Metrics Window Room",
+        tags: ["rtc"],
+        language: "ar",
+      },
+      { token: ownerToken },
+    );
+    assert.equal(createRoom.status, 200);
+    const createData = responseData(createRoom.body);
+    const roomId = createData.room_id as string;
+
+    const metrics = await getJson(
+      `${baseUrl}/api/v1/rooms/${roomId}/rtc/metrics?from=2026-03-25T10:10:00.000Z&to=2026-03-25T10:00:00.000Z`,
+      { token: ownerToken },
+    );
+    assert.equal(metrics.status, 400);
+    assert.equal(metrics.body.code, "RTC_001");
+  });
+});
+
+test("REQ-003 produce rejects out-of-range seat number", () => {
+  const req003Service = createReq003Service();
+  const created = req003Service.createTransport({
+    roomId: "r_req003_edge",
+    uid: "u_req003_edge",
+    socketId: "sock_req003_edge",
+    direction: "send",
+    now: new Date("2026-03-25T12:00:00.000Z"),
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) {
+    return;
+  }
+
+  const connected = req003Service.connectTransport({
+    transportId: created.value.transport_id,
+    uid: "u_req003_edge",
+    dtlsParameters: { role: "auto" },
+    now: new Date("2026-03-25T12:00:01.000Z"),
+  });
+  assert.equal(connected.ok, true);
+  if (!connected.ok) {
+    return;
+  }
+
+  const produced = req003Service.produce({
+    transportId: created.value.transport_id,
+    uid: "u_req003_edge",
+    kind: "audio",
+    seatNo: 9,
+    now: new Date("2026-03-25T12:00:02.000Z"),
+  });
+  assert.equal(produced.ok, false);
+  if (produced.ok) {
+    return;
+  }
+  assert.equal(produced.error.code, "RTC_003");
+});
+
+test("REQ-003 consume rejects empty rtp_capabilities", () => {
+  const req003Service = createReq003Service();
+  const created = req003Service.createTransport({
+    roomId: "r_req003_rtp",
+    uid: "u_req003_rtp",
+    socketId: "sock_req003_rtp",
+    direction: "send",
+    now: new Date("2026-03-25T12:10:00.000Z"),
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) {
+    return;
+  }
+
+  const connected = req003Service.connectTransport({
+    transportId: created.value.transport_id,
+    uid: "u_req003_rtp",
+    dtlsParameters: { role: "auto" },
+    now: new Date("2026-03-25T12:10:01.000Z"),
+  });
+  assert.equal(connected.ok, true);
+  if (!connected.ok) {
+    return;
+  }
+
+  const produced = req003Service.produce({
+    transportId: created.value.transport_id,
+    uid: "u_req003_rtp",
+    kind: "audio",
+    seatNo: 1,
+    now: new Date("2026-03-25T12:10:02.000Z"),
+  });
+  assert.equal(produced.ok, true);
+  if (!produced.ok) {
+    return;
+  }
+
+  const consumed = req003Service.consume({
+    roomId: "r_req003_rtp",
+    uid: "u_req003_rtp",
+    producerId: produced.value.producer_event.producer_id,
+    rtpCapabilities: {},
+    network: null,
+    now: new Date("2026-03-25T12:10:03.000Z"),
+  });
+  assert.equal(consumed.ok, false);
+  if (consumed.ok) {
+    return;
+  }
+  assert.equal(consumed.error.code, "RTC_001");
+});
+
+test("REQ-004 reconnect resumes inside window and returns recover snapshot", () => {
+  const req003Service = createReq003Service();
+  const roomId = "r_req004_window";
+  const uid = "u_req004_window";
+  const socketId = "sock_req004_window";
+  const baseNow = new Date("2026-03-25T13:10:00.000Z");
+
+  const transport = req003Service.createTransport({
+    roomId,
+    uid,
+    socketId,
+    direction: "send",
+    now: baseNow,
+  });
+  assert.equal(transport.ok, true);
+  if (!transport.ok) {
+    return;
+  }
+
+  const connected = req003Service.connectTransport({
+    transportId: transport.value.transport_id,
+    uid,
+    dtlsParameters: { role: "auto" },
+    now: new Date(baseNow.getTime() + 1000),
+  });
+  assert.equal(connected.ok, true);
+  if (!connected.ok) {
+    return;
+  }
+
+  const produced = req003Service.produce({
+    transportId: transport.value.transport_id,
+    uid,
+    kind: "audio",
+    seatNo: 1,
+    now: new Date(baseNow.getTime() + 2000),
+  });
+  assert.equal(produced.ok, true);
+  if (!produced.ok) {
+    return;
+  }
+
+  const issued = req003Service.issueReconnectToken({
+    roomId,
+    sessionId: "sess_req004_window",
+    uid,
+    deviceId: "device-req004-window",
+    installId: "install-req004-window",
+    seatIntent: 1,
+    now: new Date(baseNow.getTime() + 3000),
+  });
+  assert.equal(issued.ok, true);
+  if (!issued.ok) {
+    return;
+  }
+
+  const reconnected = req003Service.reconnectSession({
+    roomId,
+    sessionId: "sess_req004_window",
+    reconnectToken: issued.value.reconnect_token,
+    lastSeq: 0,
+    uid,
+    now: new Date(baseNow.getTime() + 8000),
+  });
+  assert.equal(reconnected.ok, true);
+  if (!reconnected.ok) {
+    return;
+  }
+  assert.equal(reconnected.value.resume_ok, true);
+  assert.equal(reconnected.value.rejoin_required, false);
+  assert.equal(reconnected.value.seat_resume.seat_status, "RESTORED");
+
+  const snapshot = req003Service.recoverReconnectSnapshot({
+    sessionId: "sess_req004_window",
+    uid,
+    now: new Date(baseNow.getTime() + 9000),
+  });
+  assert.equal(snapshot.ok, true);
+  if (!snapshot.ok) {
+    return;
+  }
+  assert.equal(snapshot.value.seat_state.seat_status, "RESTORED");
+  assert.equal(snapshot.value.subscription_plan.subscription_limit, 8);
+  assert.ok(snapshot.value.snapshot_seq >= reconnected.value.last_seq);
+});
+
+test("REQ-004 reconnect rejects expired window and unrecoverable seat", () => {
+  const expiredService = createReq003Service();
+  const roomId = "r_req004_expired";
+  const uid = "u_req004_expired";
+  const baseNow = new Date("2026-03-25T13:20:00.000Z");
+
+  const expiredToken = expiredService.issueReconnectToken({
+    roomId,
+    sessionId: "sess_req004_expired",
+    uid,
+    deviceId: "device-req004-expired",
+    installId: "install-req004-expired",
+    seatIntent: 1,
+    now: baseNow,
+  });
+  assert.equal(expiredToken.ok, true);
+  if (!expiredToken.ok) {
+    return;
+  }
+
+  const expiredReconnect = expiredService.reconnectSession({
+    roomId,
+    sessionId: "sess_req004_expired",
+    reconnectToken: expiredToken.value.reconnect_token,
+    lastSeq: 0,
+    uid,
+    now: new Date(baseNow.getTime() + 31_000),
+  });
+  assert.equal(expiredReconnect.ok, false);
+  if (expiredReconnect.ok) {
+    return;
+  }
+  assert.equal(expiredReconnect.error.code, "RECON_003");
+
+  const seatLostService = createReq003Service();
+  const seatLostToken = seatLostService.issueReconnectToken({
+    roomId: "r_req004_seat_lost",
+    sessionId: "sess_req004_seat_lost",
+    uid: "u_req004_seat_lost",
+    deviceId: "device-req004-seat-lost",
+    installId: "install-req004-seat-lost",
+    seatIntent: 2,
+    now: baseNow,
+  });
+  assert.equal(seatLostToken.ok, true);
+  if (!seatLostToken.ok) {
+    return;
+  }
+
+  const seatLostReconnect = seatLostService.reconnectSession({
+    roomId: "r_req004_seat_lost",
+    sessionId: "sess_req004_seat_lost",
+    reconnectToken: seatLostToken.value.reconnect_token,
+    lastSeq: 0,
+    uid: "u_req004_seat_lost",
+    now: new Date(baseNow.getTime() + 1000),
+  });
+  assert.equal(seatLostReconnect.ok, false);
+  if (seatLostReconnect.ok) {
+    return;
+  }
+  assert.equal(seatLostReconnect.error.code, "RECON_005");
+});
