@@ -44,7 +44,7 @@
 - [读/写] `docs/00-ENTRANCE/DEMAND_ENTRANCE.md`
 - [只读] `docs/01-PRODUCT/PRD.md` (测试用例必须覆盖 PRD 验收标准)
 - [只读] `docs/02-ARCHITECTURE/API_SPEC.md` (测试用例必须覆盖接口边界)
-- [读/写] `docs/03-TEST/TEST_STRATEGY.md` (测试产出物)
+- [读/写] `docs/04-TESTING/TEST_STRATEGY.md` (测试产出物)
 **动作指导**：
 - 测试通过：状态改为 `🟩 已验收`，负责人清空，通知 `documentor` 收尾。
 - 发现Bug：将报错写入 `DEBUG_NOTES.md`，状态改为 `🔴 bug修复`，负责人改回 `feature_dev`。

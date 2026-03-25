@@ -1,8 +1,27 @@
-[agents]
-max_threads = 5
-max_depth = 3
-load_from = "AGENTS.md"  # 加载所有角色
+agents.max_threads = 5
+agents.max_depth = 3
 
-[tools]
-web_search = true  # product_mgr调研用
-code_editor = true  # feature_dev写代码
+web_search = "live"
+
+[features]
+multi_agent = true
+
+[agents.product_mgr]
+description = "负责产品调研和需求分析"
+config_file = "agents/product_mgr.toml"
+
+[agents.feature_dev]
+description = "负责功能开发和代码实现"
+config_file = "agents/feature_dev.toml"
+
+[agents.arch_perf_dev]
+description = "负责架构设计和性能优化"
+config_file = "agents/arch_perf_dev.toml"
+
+[agents.documentor]
+description = "负责文档撰写和维护"
+config_file = "agents/documentor.toml"
+
+[agents.test_writer]
+description = "负责编写测试用例"
+config_file = "agents/test_writer.toml"
