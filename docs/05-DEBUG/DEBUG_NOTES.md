@@ -8,6 +8,7 @@
 - v0.4 -> v0.5：补充REQ-001收尾复盘（实现口径、测试验收结果、踩坑记录、后续守护项），用于M1前复用。
 - v0.5 -> v0.6：补录REQ-001 Android交付证据，新增REQ-002收尾复盘（建房/入房/送礼闭环、幂等与风控）。
 - v0.6 -> v0.7：新增REQ-003文档沉淀，统一阶段验收、补证项与后续跟踪口径。
+- v0.7 -> v0.8：补录REQ-004真机 `websocketerror` 排查与 Android Socket transport 可切换方案，增强自动化可观测性。
 
 ## REQ-001 收尾复盘（2026-03-25）
 ### 1) 交付结论
@@ -114,6 +115,59 @@
 1. 所有重连方案都要先明确`session_id + reconnect_token + last_seq + seat_intent`这组恢复基线，不要把恢复入口藏到隐式状态里。
 2. `room.recover_hint` 和 `RECON_003/RECON_005` 这类降级信号要直接暴露给客户端，避免“表面恢复成功、实际不可操作”。
 3. 若后续补齐真机证据，优先补“前后台切换”和“Wi-Fi/4G 切网”两条路径，因为它们最容易暴露恢复窗口与状态机的边界问题。
+
+## autoTest 真机日志检测修正（2026-03-26）
+### 1) 现象
+- 在真机上能看到 `Room r_15620bf13a30 created.` 以及 app 内事件列表，但 `autoTest` 早期实现只读取 `adb logcat`，因此会误判为“没有日志”。
+
+### 2) 根因
+- 当前 ChatRoom 的关键房间/会话事件主要渲染在 UI 的 `Event Logs` / `statusMessage` 区域，并不保证会同步输出到系统 `logcat`。
+- 只依赖 `adb logcat` 会把“UI 可见、系统日志不可见”的状态误当成失败，尤其在房间创建、`room.joined`、`session.reconnect` 这类信令阶段最明显。
+
+### 3) 修正
+- `autoTest` 已修正为 `UI dump + logcat` 双通道观察，UI 文本作为主信号，`logcat` 作为补充。
+- 后续若要更稳，建议给这些状态文本补稳定 `contentDescription` 或更明确的调试输出接口，避免 UI 文本变更造成检测回退。
+
+## REQ-004 真机 `websocketerror` 排查补记（2026-03-26）
+### 1) 现场现象
+- Android 真机可完成登录，但 Socket.IO 在后续连接阶段持续报 `socket.error -> io.socket.engineio.client.engineIOException:websocketerror`。
+- 现象集中在真机网络环境，无法通过现有黑盒日志直接区分是 WebSocket 握手失败、服务端可达性问题，还是客户端过早把自己锁死在单一 transport 上。
+
+### 2) 定位结论
+- 客户端连接策略此前固定为 WebSocket-only，这会让真机上任何 upgrade / handshake 异常直接暴露为 `websocketerror`，而不会自动退回到更稳妥的 polling 路径。
+- 该问题不属于 REQ-004 恢复协议本身，而是更靠前的“信令可达性与诊断能力”问题，必须先把连接策略和可观测性补齐，后续重连闭环才有稳定前提。
+
+### 3) 修复动作
+- 为 Android 登录页增加 debug 连接模式切换，支持 `polling+websocket` 与 `websocket-only` 两种模式。
+- 默认 debug 模式采用 `polling+websocket`，以便先验证服务端可达和 Socket.IO 升级链路，再按需切回 `websocket-only` 排查。
+- 在登录页和工作区补充稳定的状态文本与测试标识，方便 host-side 自动化稳定抓取当前 transport、Socket 状态和错误提示。
+
+### 4) 后续守护
+- 若 `polling+websocket` 仍然失败，优先排查服务端可达性、CORS、真机到测试机的网络路由，以及服务端是否真的监听在真机可访问地址上。
+- 真机回归时必须同时保留登录前后事件日志、Socket 状态文本和连接模式，避免再次只剩一个泛化的 `socket.error`。
+
+## REQ-004 真机基线执行记录（2026-03-26）
+### 1) 当前确认结果
+- `autoTest` 的本地单测已通过：`pytest 9 passed / 0 failed`。
+- 真机设备已连接，`adb devices -l` 可识别到 `Pixel_4`。
+- 同一 shell 中 `adb reverse --list` 返回 `UsbFfs tcp:3100 tcp:3100`，说明当前测试环境里 `127.0.0.1:3100` 的反向隧道处于可用状态。
+- 当前 UI 快照显示房间已创建且已入房：
+  - `Room r_15620bf13a30 created.`
+  - `room.joined session=sess_room_2f19f5fe65`
+  - `Event Logs`
+  - `create_room -> r_15620bf13a30`
+  - `join_token -> jt_64061d0367514...`
+  - `room.joined -> online=1`
+- 当前快照没有再次看到 `socket.error` / `websocketerror` / `room.recover_hint`。
+
+### 2) 记录方式
+- 本次基线采用 `adb shell uiautomator dump` + `adb pull` 的方式抓取 UI 层日志文本，避免只看 `logcat` 造成误判。
+- 这一点对 REQ-004 尤其重要，因为房间事件主要以 UI 文本形式渲染，而不是全部落到系统日志。
+
+### 3) 后续由你继续的真机验证
+- 继续验证断网 5 秒、25 秒、35 秒三档恢复窗口。
+- 继续验证后台 25 秒后回前台的恢复路径。
+- 如果恢复过程中再次出现 `socket.error -> websocketerror`，优先记录当前网络模式、`adb reverse` 状态与 UI 中的连接模式文本，再决定是否转回 `feature_dev`。
 
 ## 并行协作通讯协议记录（冲突对齐）
 | 时间（UTC+8） | 参与角色 | 冲突点 | 对齐结论 | 动作 |

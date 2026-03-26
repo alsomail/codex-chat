@@ -1,5 +1,6 @@
 package com.chatroom.app.login
 
+import com.chatroom.app.BuildConfig
 import io.socket.client.IO
 import io.socket.client.Socket
 import io.socket.engineio.client.transports.WebSocket
@@ -187,8 +188,47 @@ data class RtcConsumeCommand(
     val network: NetworkSnapshot? = null,
 )
 
+enum class SocketTransportMode(
+    val displayName: String,
+    val transports: Array<String>,
+) {
+    POLLING_AND_WEBSOCKET(
+        displayName = "polling+websocket",
+        transports = arrayOf("polling", WebSocket.NAME),
+    ),
+    WEBSOCKET_ONLY(
+        displayName = "websocket-only",
+        transports = arrayOf(WebSocket.NAME),
+    ),
+    ;
+
+    companion object {
+        fun fromLabel(label: String?): SocketTransportMode {
+            val normalized = label?.trim().orEmpty()
+            return entries.firstOrNull {
+                it.displayName.equals(normalized, ignoreCase = true)
+            } ?: default()
+        }
+
+        fun default(): SocketTransportMode {
+            return if (BuildConfig.DEBUG) {
+                POLLING_AND_WEBSOCKET
+            } else {
+                WEBSOCKET_ONLY
+            }
+        }
+    }
+}
+
+fun defaultSocketTransportMode(): SocketTransportMode = SocketTransportMode.default()
+
 interface RealtimeRoomGateway {
-    fun connect(accessToken: String, deviceId: String, listener: RealtimeRoomListener)
+    fun connect(
+        accessToken: String,
+        deviceId: String,
+        transportMode: SocketTransportMode,
+        listener: RealtimeRoomListener,
+    )
     fun joinRoom(roomId: String, joinToken: String)
     fun leaveRoom(roomId: String)
     fun sendGift(command: GiftSendCommand)
@@ -203,7 +243,12 @@ interface RealtimeRoomGateway {
 class NoopRealtimeRoomGateway : RealtimeRoomGateway {
     private var listener: RealtimeRoomListener? = null
 
-    override fun connect(accessToken: String, deviceId: String, listener: RealtimeRoomListener) {
+    override fun connect(
+        accessToken: String,
+        deviceId: String,
+        transportMode: SocketTransportMode,
+        listener: RealtimeRoomListener,
+    ) {
         this.listener = listener
         listener.onError("Realtime gateway is not configured.")
     }
@@ -282,7 +327,12 @@ class SocketIoRealtimeRoomGateway(
     private var socket: Socket? = null
     private var listener: RealtimeRoomListener? = null
 
-    override fun connect(accessToken: String, deviceId: String, listener: RealtimeRoomListener) {
+    override fun connect(
+        accessToken: String,
+        deviceId: String,
+        transportMode: SocketTransportMode,
+        listener: RealtimeRoomListener,
+    ) {
         if (socket?.connected() == true) {
             this.listener = listener
             listener.onConnected()
@@ -293,7 +343,7 @@ class SocketIoRealtimeRoomGateway(
         val options = IO.Options().apply {
             forceNew = true
             reconnection = true
-            transports = arrayOf(WebSocket.NAME)
+            transports = transportMode.transports
             auth = mapOf(
                 "token" to accessToken,
                 "deviceId" to deviceId,

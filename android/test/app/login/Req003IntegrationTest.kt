@@ -15,7 +15,7 @@ class Req003IntegrationTest {
     @Test
     fun `req003 android service socket integration`() = runBlocking {
         assumeTrue(System.getenv("REQ003_INTEGRATION") == "1")
-        val baseUrl = System.getenv("REQ003_BASE_URL") ?: "http://127.0.0.1:3100"
+        val baseUrl = System.getenv("REQ003_BASE_URL") ?: "http://192.168.1.19:3100"
         val demoOtp = System.getenv("REQ003_DEMO_OTP") ?: "123456"
 
         val authRepository = NetworkAuthRepository(baseUrl)
@@ -48,7 +48,12 @@ class Req003IntegrationTest {
 
         val listener = RtcIntegrationListener()
         val gateway = SocketIoRealtimeRoomGateway(baseUrl)
-        gateway.connect(login.accessToken, deviceId, listener)
+        gateway.connect(
+            accessToken = login.accessToken,
+            deviceId = deviceId,
+            transportMode = defaultSocketTransportMode(),
+            listener = listener,
+        )
         assertTrue(listener.connectedLatch.await(6, TimeUnit.SECONDS))
 
         gateway.joinRoom(room.roomId, joinToken.joinToken)

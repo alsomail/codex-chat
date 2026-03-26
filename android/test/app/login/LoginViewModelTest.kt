@@ -63,6 +63,53 @@ class LoginViewModelTest {
     }
 
     @Test
+    fun `login forwards selected socket transport mode`() = runTest {
+        val fakeAuth = FakeAuthRepository()
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway()
+        val viewModel = buildViewModel(
+            authRepository = fakeAuth,
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onSocketTransportModeChanged(SocketTransportMode.WEBSOCKET_ONLY.displayName)
+        viewModel.onPhoneChanged("+971500000111")
+        viewModel.onOtpChanged("123456")
+
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        assertEquals(SocketTransportMode.WEBSOCKET_ONLY, realtime.lastSocketTransportMode)
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("socket.connect -> websocket-only") })
+    }
+
+    @Test
+    fun `websocket error exposes polling fallback hint`() = runTest {
+        val fakeAuth = FakeAuthRepository()
+        val fakeRooms = FakeRoomRepository()
+        val realtime = FakeRealtimeGateway().apply {
+            nextConnectErrorMessage = "io.socket.engineio.client.engineIOException:websocketerror"
+        }
+        val viewModel = buildViewModel(
+            authRepository = fakeAuth,
+            roomRepository = fakeRooms,
+            realtimeGateway = realtime,
+        )
+        viewModel.onSocketTransportModeChanged(SocketTransportMode.WEBSOCKET_ONLY.displayName)
+        viewModel.onPhoneChanged("+971500000112")
+        viewModel.onOtpChanged("123456")
+
+        viewModel.onLoginClicked()
+        advanceUntilIdle()
+
+        assertEquals(SocketTransportMode.WEBSOCKET_ONLY, realtime.lastSocketTransportMode)
+        assertTrue(viewModel.uiState.value.errorMessage?.contains("websocketerror", ignoreCase = true) == true)
+        assertTrue(
+            viewModel.uiState.value.socketConnectionHint?.contains("polling+websocket", ignoreCase = true) == true,
+        )
+    }
+
+    @Test
     fun `login failure keeps user on login screen`() = runTest {
         val fakeAuth = FakeAuthRepository(shouldFailLogin = true)
         val viewModel = buildViewModel(authRepository = fakeAuth)
@@ -378,14 +425,28 @@ class LoginViewModelTest {
 
         viewModel.onDisconnected()
         advanceUntilIdle()
-        viewModel.onConnected()
+        viewModel.onSessionReconnected(
+            SessionReconnectedEvent(
+                roomId = "room-001",
+                sessionId = "sess-room-fake",
+                resumeOk = true,
+                needResubscribe = true,
+                needSnapshotPull = true,
+                rejoinRequired = false,
+                lastSeq = 4,
+                expiresAt = "2026-03-25T10:00:30.000Z",
+                seatNo = 1,
+                seatStatus = "RESTORED",
+                errorCode = null,
+                reason = null,
+            ),
+        )
         advanceUntilIdle()
 
-        assertEquals("RECOVERED", viewModel.uiState.value.reconnectState)
         assertFalse(viewModel.uiState.value.reconnectPending)
-        assertEquals("recon-fake-token", viewModel.uiState.value.reconnectToken)
         assertNotNull(fakeRooms.lastRecoverSnapshotCall)
-        assertEquals("sess-room-fake", realtime.lastReconnectCommand?.sessionId)
+        assertEquals("sess-room-fake", fakeRooms.lastRecoverSnapshotCall?.sessionId)
+        assertTrue(viewModel.uiState.value.eventLogs.any { it.contains("session.reconnected") })
     }
 
     @Test
@@ -689,9 +750,12 @@ private class FakeRealtimeGateway : RealtimeRoomGateway {
     private var listener: RealtimeRoomListener? = null
     var nextGiftRejected: GiftRejectedEvent? = null
     var nextSeatConflict: Boolean = false
+    var nextConnectErrorMessage: String? = null
     var connectCalls: Int = 0
         private set
     var disconnectCalls: Int = 0
+        private set
+    var lastSocketTransportMode: SocketTransportMode? = null
         private set
     var lastJoinRoomId: String? = null
         private set
@@ -707,9 +771,21 @@ private class FakeRealtimeGateway : RealtimeRoomGateway {
         private set
     val sentGiftCommands = mutableListOf<GiftSendCommand>()
 
-    override fun connect(accessToken: String, deviceId: String, listener: RealtimeRoomListener) {
+    override fun connect(
+        accessToken: String,
+        deviceId: String,
+        transportMode: SocketTransportMode,
+        listener: RealtimeRoomListener,
+    ) {
         connectCalls += 1
+        lastSocketTransportMode = transportMode
         this.listener = listener
+        val connectError = nextConnectErrorMessage
+        if (connectError != null) {
+            nextConnectErrorMessage = null
+            listener.onError(connectError)
+            return
+        }
         listener.onConnected()
     }
 

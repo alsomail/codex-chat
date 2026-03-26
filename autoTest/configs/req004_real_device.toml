@@ -1,0 +1,23 @@
+[adb]
+binary = "adb"
+serial = ""
+
+[app]
+package_name = "com.chatroom.app"
+launcher_activity = "com.chatroom.app.login.LoginActivity"
+login_phone = "+971500009001"
+login_otp = "123456"
+base_url = "http://127.0.0.1:3100"
+health_path = "/healthz"
+room_id = ""
+manual_mode = true
+
+[capture]
+artifact_dir = "artifacts"
+logcat_buffer_lines = 2000
+record_seconds = 30
+
+[flow]
+wait_seconds_after_launch = 3
+wait_seconds_after_login = 3
+wait_seconds_after_reconnect = 5

@@ -215,3 +215,17 @@
 ### 13.5 当前结论（REQ-004）
 - 结论：`CONDITIONAL PASS（最小闭环验收通过）`，允许按本周最小范围将`REQ-004`推进到`🟩已验收`。
 - 结论口径：本次“已验收”仅代表`单Worker / 单房间 / Android真机 + service测试环境`的最小恢复闭环达成，不外推为“多实例/真实切网/全量网络条件全部通过”。
+
+### 13.6 当前真机执行基线（2026-03-26）
+- `autoTest` 单元测试已通过：`pytest` -> `9 passed / 0 failed`。
+- 真机设备已连接：`Pixel_4`，`adb devices -l` 可见，且同一 shell 中 `adb reverse --list` 显示 `UsbFfs tcp:3100 tcp:3100`，说明 `127.0.0.1:3100` 的反向隧道处于可用状态。
+- 当前真机 UI 快照已确认处于入房后状态，页面可见：
+  - `Room r_15620bf13a30 created.`
+  - `room.joined session=sess_room_2f19f5fe65`
+  - `Event Logs`
+  - `create_room -> r_15620bf13a30`
+  - `join_token -> jt_64061d0367514...`
+  - `room.joined -> online=1`
+- 当前基线未复现 `socket.error -> io.socket.engineio.client.engineIOException:websocketerror`。
+- 当前测试只记录到“登录成功 + 建房/入房成功 + UI 日志可见”的稳定基线；断网/恢复窗口、超窗重入房与麦位恢复仍留待后续真机继续验证。
+- 运行限制：在当前沙箱里，`python3 main.py --real-device` 的 ADB 子进程有时会因 daemon 启动权限受限而退回 dry-run；直接 `adb` 命令与 UI 快照抓取可用，后续真机测试建议以直接 `adb` 和手工步骤为主。

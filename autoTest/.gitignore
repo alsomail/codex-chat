@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+artifacts/*.json
+artifacts/*.md
+artifacts/*.png
+artifacts/*.mp4
+artifacts/*.txt
+artifacts/*.xml

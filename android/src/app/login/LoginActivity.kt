@@ -39,9 +39,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -92,17 +95,18 @@ private fun LoginRoute(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
-    if (!uiState.isLoginSuccess) {
-        LoginScreen(
-            uiState = uiState,
-            onPhoneChanged = viewModel::onPhoneChanged,
-            onOtpChanged = viewModel::onOtpChanged,
-            onCountrySelected = viewModel::onCountrySelected,
-            onLanguageSelected = viewModel::onLanguageSelected,
-            onLoginClicked = viewModel::onLoginClicked,
-        )
-        return
-    }
+        if (!uiState.isLoginSuccess) {
+            LoginScreen(
+                uiState = uiState,
+                onPhoneChanged = viewModel::onPhoneChanged,
+                onOtpChanged = viewModel::onOtpChanged,
+                onCountrySelected = viewModel::onCountrySelected,
+                onLanguageSelected = viewModel::onLanguageSelected,
+                onSocketTransportModeChanged = viewModel::onSocketTransportModeChanged,
+                onLoginClicked = viewModel::onLoginClicked,
+            )
+            return
+        }
 
     ReqWorkspaceScreen(
         uiState = uiState,
@@ -137,6 +141,7 @@ private fun LoginScreen(
     onOtpChanged: (String) -> Unit,
     onCountrySelected: (String) -> Unit,
     onLanguageSelected: (String) -> Unit,
+    onSocketTransportModeChanged: (String) -> Unit,
     onLoginClicked: () -> Unit,
 ) {
     val headerGradient = Brush.linearGradient(
@@ -169,7 +174,9 @@ private fun LoginScreen(
             )
 
             OutlinedTextField(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("login_phone_input"),
                 value = uiState.phone,
                 onValueChange = onPhoneChanged,
                 label = { Text(text = "Phone") },
@@ -179,7 +186,9 @@ private fun LoginScreen(
             )
 
             OutlinedTextField(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("login_otp_input"),
                 value = uiState.otp,
                 onValueChange = onOtpChanged,
                 label = { Text(text = "OTP") },
@@ -211,6 +220,30 @@ private fun LoginScreen(
                 onSelected = onLanguageSelected,
             )
 
+            if (BuildConfig.DEBUG) {
+                Text(
+                    text = "Connection transport",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                SelectableChipRow(
+                    modifier = Modifier.testTag("socket_transport_selector"),
+                    values = SocketTransportMode.entries.map { it.displayName },
+                    selected = uiState.socketTransportMode.displayName,
+                    onSelected = onSocketTransportModeChanged,
+                )
+                Text(
+                    text = "Mode: ${uiState.socketTransportMode.displayName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .testTag("socket_transport_mode_text")
+                        .semantics {
+                            contentDescription = "socket_transport_mode:${uiState.socketTransportMode.displayName}"
+                        },
+                )
+            }
+
             if (uiState.isLoading) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -224,7 +257,9 @@ private fun LoginScreen(
             }
 
             ElevatedButton(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("login_submit_button"),
                 onClick = onLoginClicked,
                 enabled = !uiState.isLoading,
                 contentPadding = PaddingValues(vertical = 12.dp),
@@ -276,12 +311,33 @@ private fun ReqWorkspaceScreen(
                 Text(
                     text = "REQ-001 / REQ-002 Workspace",
                     style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.testTag("workspace_title"),
                 )
                 Text(
                     text = "Locale ${uiState.country}/${uiState.language} · Socket ${if (uiState.realtimeConnected) "connected" else "disconnected"}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .testTag("workspace_socket_state")
+                        .semantics {
+                            contentDescription =
+                                "workspace_socket_state:${if (uiState.realtimeConnected) "connected" else "disconnected"}"
+                        },
                 )
+                Text(
+                    text = "Transport ${uiState.socketTransportMode.displayName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("workspace_socket_transport"),
+                )
+                uiState.socketConnectionHint?.let { hint ->
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("workspace_socket_hint"),
+                    )
+                }
             }
             item {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
@@ -437,14 +493,18 @@ private fun ReqWorkspaceScreen(
                             style = MaterialTheme.typography.bodySmall,
                         )
                         OutlinedTextField(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("gift_target_input"),
                             value = uiState.giftTargetUid,
                             onValueChange = onGiftTargetChanged,
                             label = { Text("to_uid") },
                             singleLine = true,
                         )
                         OutlinedTextField(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("gift_count_input"),
                             value = uiState.giftCountInput,
                             onValueChange = onGiftCountChanged,
                             label = { Text("count (1-99)") },
@@ -489,6 +549,7 @@ private fun ReqWorkspaceScreen(
                         text = it,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("workspace_status_message"),
                     )
                 }
                 uiState.errorMessage?.let {
@@ -496,6 +557,7 @@ private fun ReqWorkspaceScreen(
                         text = it,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("workspace_error_message"),
                     )
                 }
             }
@@ -508,12 +570,18 @@ private fun ReqWorkspaceScreen(
                 }
             } else {
                 items(uiState.eventLogs) { log ->
-                    Text(log, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        log,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("workspace_event_log_item"),
+                    )
                 }
             }
             item {
                 ElevatedButton(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("workspace_back_button"),
                     onClick = onBack,
                 ) {
                     Text("Back to login")
@@ -525,11 +593,15 @@ private fun ReqWorkspaceScreen(
 
 @Composable
 private fun SelectableChipRow(
+    modifier: Modifier = Modifier,
     values: List<String>,
     selected: String,
     onSelected: (String) -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         values.forEach { value ->
             val isSelected = value == selected
             AssistChip(
@@ -557,6 +629,7 @@ data class LoginUiState(
     val otp: String = "",
     val country: String = defaultCountry,
     val language: String = defaultLanguage,
+    val socketTransportMode: SocketTransportMode = defaultSocketTransportMode(),
     val rooms: List<RoomPreview> = emptyList(),
     val gifts: List<GiftSku> = emptyList(),
     val walletSummary: WalletSummary? = null,
@@ -571,6 +644,7 @@ data class LoginUiState(
     val reconnectSeatIntent: Int? = null,
     val reconnectState: String = "CONNECTED",
     val reconnectPending: Boolean = false,
+    val socketConnectionHint: String? = null,
     val createRoomTopic: String = "Night Owl Talk",
     val createRoomVisibility: String = "PUBLIC",
     val giftTargetUid: String = "u_host",
@@ -775,6 +849,16 @@ class LoginViewModel(
         }
     }
 
+    fun onSocketTransportModeChanged(value: String) {
+        mutableUiState.update {
+            it.copy(
+                socketTransportMode = SocketTransportMode.fromLabel(value),
+                socketConnectionHint = null,
+                errorMessage = null,
+            )
+        }
+    }
+
     fun onLoginClicked() {
         val snapshot = uiState.value
         val validationMessage = validate(snapshot)
@@ -800,7 +884,13 @@ class LoginViewModel(
                 .onSuccess { response ->
                     activeDeviceId = request.deviceId
                     tokenStore.save(response)
-                    realtimeGateway.connect(response.accessToken, request.deviceId, this@LoginViewModel)
+                    appendEvent("socket.connect -> ${snapshot.socketTransportMode.displayName}")
+                    realtimeGateway.connect(
+                        accessToken = response.accessToken,
+                        deviceId = request.deviceId,
+                        transportMode = snapshot.socketTransportMode,
+                        listener = this@LoginViewModel,
+                    )
                     val rooms = runCatching {
                         roomRepository.fetchRecommendedRooms(response.accessToken)
                     }.getOrElse { emptyList() }
@@ -814,7 +904,7 @@ class LoginViewModel(
                             sessionId = response.sessionId,
                             rooms = rooms,
                             walletSummary = wallet,
-                            statusMessage = "Login success.",
+                            statusMessage = "Login success. Socket ${snapshot.socketTransportMode.displayName}.",
                             errorMessage = null,
                         )
                     }
@@ -858,12 +948,19 @@ class LoginViewModel(
                     ),
                 )
                 realtimeGateway.disconnect()
-                realtimeGateway.connect(refreshed.accessToken, deviceId, this@LoginViewModel)
+                val socketTransportMode = uiState.value.socketTransportMode
+                appendEvent("socket.connect -> ${socketTransportMode.displayName}")
+                realtimeGateway.connect(
+                    accessToken = refreshed.accessToken,
+                    deviceId = deviceId,
+                    transportMode = socketTransportMode,
+                    listener = this@LoginViewModel,
+                )
                 mutableUiState.update {
                     it.copy(
                         isLoading = false,
                         sessionId = refreshed.sessionId,
-                        statusMessage = "Refresh rotated successfully.",
+                        statusMessage = "Refresh rotated successfully. Socket ${socketTransportMode.displayName}.",
                         errorMessage = null,
                     )
                 }
@@ -1280,8 +1377,13 @@ class LoginViewModel(
 
     override fun onConnected() {
         dispatchUiUpdate {
-            it.copy(realtimeConnected = true, statusMessage = "Socket connected.")
+            it.copy(
+                realtimeConnected = true,
+                socketConnectionHint = null,
+                statusMessage = "Socket connected (${it.socketTransportMode.displayName}).",
+            )
         }
+        appendEvent("socket.connected -> ${uiState.value.socketTransportMode.displayName}")
         maybeReconnectRoom()
     }
 
@@ -1294,6 +1396,7 @@ class LoginViewModel(
                 statusMessage = "Socket disconnected, waiting reconnect.",
             )
         }
+        appendEvent("socket.disconnected -> ${uiState.value.socketTransportMode.displayName}")
     }
 
     override fun onRoomJoined(event: RoomJoinedEvent) {
@@ -1314,6 +1417,7 @@ class LoginViewModel(
                 reconnectPending = false,
                 reconnectState = "CONNECTED",
                 reconnectExpiresAt = null,
+                socketConnectionHint = null,
             )
         }
         appendEvent("room.joined -> online=${event.onlineCount}")
@@ -1509,7 +1613,15 @@ class LoginViewModel(
     }
 
     override fun onError(message: String) {
-        dispatchUiUpdate { it.copy(errorMessage = message) }
+        val snapshot = uiState.value
+        val socketHint = diagnoseSocketConnectionIssue(message, snapshot.socketTransportMode)
+        dispatchUiUpdate {
+            it.copy(
+                errorMessage = message,
+                socketConnectionHint = socketHint,
+                statusMessage = "Socket connect error (${snapshot.socketTransportMode.displayName}).",
+            )
+        }
         appendEvent("socket.error -> $message")
     }
 
@@ -1540,6 +1652,25 @@ class LoginViewModel(
             val logLine = "[${System.currentTimeMillis()}][seq=$nextSeq] $message"
             val logs = (it.eventLogs + logLine).takeLast(40)
             it.copy(eventLogs = logs, reconnectLastSeq = nextSeq)
+        }
+    }
+
+    private fun diagnoseSocketConnectionIssue(
+        message: String,
+        transportMode: SocketTransportMode,
+    ): String? {
+        val normalizedMessage = message.lowercase(Locale.ROOT)
+        val websocketError = normalizedMessage.contains("websocketerror") || normalizedMessage.contains("websocket error")
+        if (!websocketError) {
+            return null
+        }
+        return when (transportMode) {
+            SocketTransportMode.WEBSOCKET_ONLY -> {
+                "WebSocket-only handshake failed. Switch debug transport to polling+websocket and verify base URL reachability."
+            }
+            SocketTransportMode.POLLING_AND_WEBSOCKET -> {
+                "Socket.IO transport upgrade failed. Check server reachability, CORS, and local Wi-Fi route."
+            }
         }
     }
 
